@@ -1,0 +1,501 @@
+# Alpaca ETH/USD Paper Trading Agent Plan
+
+Date: 2026-03-11
+Status: Initial planning document
+
+## 1. Project Goal
+
+Build a research-phase autonomous trading system for `ETH/USD` on Alpaca that:
+
+- consumes live crypto market data
+- analyzes the market continuously
+- decides whether to trade
+- respects account balance and user-defined risk
+- avoids overtrading
+- executes paper trades through Alpaca
+- logs every decision and trade
+- learns from mistakes through a controlled feedback loop
+
+This project is for research and paper trading first, not live deployment.
+
+## 2. Core Design Principles
+
+1. Separate analysis from execution.
+The model can recommend an action, but it must not bypass hard risk and execution controls.
+
+2. Prefer event-driven design over polling.
+Use Alpaca WebSocket streams for market data and order updates. Use REST mainly for account sync, positions, and order placement.
+
+3. Keep risk deterministic.
+Risk sizing, kill switches, exposure limits, and cooldown rules should be code, not prompt-only behavior.
+
+4. Learn offline, not by self-modifying in production.
+The system should log outcomes continuously, review them offline, and deploy improved policy versions only after evaluation.
+
+5. Version everything.
+Prompts, thresholds, strategy settings, model versions, and risk settings should all be versioned.
+
+## 3. Initial Scope
+
+The first version should stay intentionally narrow:
+
+- broker: Alpaca
+- market: crypto
+- symbol: `ETH/USD`
+- environment: paper trading only
+- operation mode: 24/7
+- near-term execution: local testing and iterative refinement during research
+- deployment target: move the stabilized always-on agent to a VPS/VM instead of relying on a personal computer
+- strategy scope: single-position directional trading
+- position style: flat or long/short depending on feasibility in paper environment
+- request budget: comfortably under `200` API requests per minute
+
+## 4. High-Level Architecture
+
+The system should be built as the following modules:
+
+### 4.1 Market Data Service
+
+Responsibilities:
+
+- connect to Alpaca crypto WebSocket
+- subscribe to `ETH/USD`
+- maintain rolling market state
+- build bars or snapshots at configured intervals
+- compute streaming features
+
+Outputs:
+
+- latest trade, quote, spread, and bar state
+- rolling indicators
+- feature vectors for the strategy layer
+
+### 4.2 Portfolio State Service
+
+Responsibilities:
+
+- fetch and refresh account balance
+- track buying power, cash, equity, open positions, and open orders
+- reconcile state with Alpaca periodically
+
+Outputs:
+
+- normalized portfolio state used by risk and execution services
+
+### 4.3 Analyst Service
+
+Responsibilities:
+
+- consume market features and portfolio context
+- classify the market regime
+- estimate whether a trade setup exists
+- recommend one of: `buy`, `sell`, `hold`, `exit`, `do nothing`
+- produce a confidence score and concise rationale
+
+Important constraint:
+
+- analyst output must be structured JSON with a strict schema
+- analyst cannot submit orders directly
+
+### 4.4 Risk Service
+
+Responsibilities:
+
+- veto unsafe or low-quality trade recommendations
+- convert strategy recommendations into allowed position sizes
+- enforce hard limits
+
+Rules should include:
+
+- max risk per trade
+- max position size
+- max daily drawdown
+- max trades per hour
+- cooldown after losses
+- minimum confidence threshold
+- minimum expected edge threshold
+- spread/slippage guardrails
+- no duplicate entries while an order is pending
+- stop trading on inconsistent state
+
+### 4.5 Execution Service
+
+Responsibilities:
+
+- place paper orders through Alpaca
+- track order lifecycle
+- handle retries and reconciliation
+- react to fills and cancellations
+
+Important constraint:
+
+- all live order logic must go through this service only
+
+### 4.6 Review and Learning Service
+
+Responsibilities:
+
+- record each decision and trade outcome
+- label outcomes after a time horizon or after position close
+- identify mistakes and failure modes
+- summarize lessons
+- generate candidate improvements to prompts, thresholds, or strategy settings
+
+Important constraint:
+
+- changes are proposed offline and promoted only after evaluation
+
+## 5. Recommended Runtime Flow
+
+1. Receive live `ETH/USD` market updates from Alpaca.
+2. Update rolling state and derived features.
+3. On each decision interval, call the analyst service.
+4. Validate the analyst recommendation through the risk service.
+5. If approved, send an order request to the execution service.
+6. Monitor order updates and refresh position state.
+7. Log the complete decision package.
+8. After trade exit or evaluation horizon, compute outcome and store review notes.
+9. Periodically run an offline improvement job to review results and propose tuned policy versions.
+
+## 6. Data and Memory Design
+
+The system should use multiple memory layers instead of one generic memory store.
+
+### 6.1 Hot State Memory
+
+Purpose:
+
+- real-time state needed for sub-second to minute-level decisions
+
+Data:
+
+- latest quotes and trades
+- rolling indicators
+- current account snapshot
+- current open position
+- pending orders
+
+Suggested store:
+
+- in-process cache or Redis
+
+### 6.2 Episodic Trade Memory
+
+Purpose:
+
+- persistent history of all decisions and their outcomes
+
+Data per decision:
+
+- timestamp
+- market snapshot
+- feature vector
+- analyst prompt version
+- analyst output
+- confidence score
+- risk decision
+- order request
+- order result
+- eventual outcome metrics
+
+Suggested store:
+
+- PostgreSQL
+- Supabase Postgres is acceptable for research if you want a managed hosted database, but strategy changes must still be reviewed and promoted explicitly
+
+### 6.3 Lesson Memory
+
+Purpose:
+
+- compact memory of recurring success and failure patterns
+
+Examples:
+
+- long entries fail in high spread and low conviction conditions
+- best setups occur when short-term and medium-term momentum align
+- losing trades cluster after three consecutive rapid decisions
+
+Suggested store:
+
+- PostgreSQL table first
+- vector index only if free-form retrieval becomes useful later
+
+### 6.4 Policy Memory
+
+Purpose:
+
+- preserve reproducibility of strategy versions
+
+Data:
+
+- model version
+- prompt version
+- feature set version
+- thresholds
+- risk parameters
+- deployment dates
+
+Important constraint:
+
+- the live agent may read policy versions and stored lessons, but it should not autonomously promote unreviewed strategy changes into production behavior
+
+## 7. Feedback Loop and Learning Design
+
+The feedback loop should be explicit and measurable.
+
+### 7.1 Online Feedback Loop
+
+For every decision:
+
+- capture the exact input state
+- capture the exact output decision
+- capture whether the risk layer approved or rejected it
+- capture the eventual trade result
+
+### 7.2 Post-Trade Review Loop
+
+For each completed trade:
+
+- compare expected direction vs realized move
+- record realized PnL, adverse excursion, favorable excursion, hold time, and exit reason
+- classify failure mode
+
+Failure-mode categories:
+
+- wrong regime classification
+- weak signal quality
+- poor entry timing
+- poor exit timing
+- oversizing
+- overtrading
+- spread/slippage issue
+- infrastructure or state sync issue
+
+### 7.3 Offline Improvement Loop
+
+Run on a schedule such as daily or weekly:
+
+- aggregate recent trade performance
+- identify which signals and regimes work
+- adjust thresholds or prompt instructions
+- create a new candidate policy
+- replay or backtest it on stored data
+- deploy only if it beats the current baseline on defined metrics
+
+## 8. Reinforcement and Learning Strategy
+
+Do not start with unrestricted online reinforcement learning.
+
+Recommended progression:
+
+1. Baseline deterministic strategy with logs.
+2. Add an LLM analyst for regime detection and trade thesis.
+3. Add offline learning that tunes thresholds and risk settings.
+4. Add champion-vs-challenger policy testing.
+5. Only later consider contextual bandits or constrained reinforcement learning for selecting among pre-approved strategy variants.
+
+This is safer and easier to debug than a self-modifying live policy.
+
+## 9. Risk Management Requirements
+
+The first version should include all of the following:
+
+- max percent risk per trade
+- max notional exposure
+- max open positions at once
+- max orders per hour
+- max daily loss
+- max consecutive losses
+- cooldown timer after exit
+- no-trade mode during missing or stale data
+- no-trade mode during order state mismatch
+- no-trade mode during sharp spread expansion
+- hard global kill switch
+
+## 10. Observability and Auditability
+
+Every decision must be explainable after the fact.
+
+Required logs:
+
+- market snapshot at decision time
+- feature values
+- analyst result
+- risk result
+- order request and response
+- position change
+- PnL impact
+- policy version
+
+Recommended dashboards:
+
+- account equity over time
+- open position and exposure
+- trade frequency
+- win rate
+- expectancy
+- drawdown
+- rejected trade reasons
+- model confidence distribution
+
+## 11. Suggested Folder Structure
+
+```text
+AT/
+  AGENTS.md
+  docs/
+    alpaca-eth-agent-plan.md
+  src/
+    app/
+      main.py
+      config.py
+    brokers/
+      alpaca/
+        client.py
+        market_data.py
+        trading.py
+        account.py
+    data/
+      feature_engine.py
+      state_store.py
+      schemas.py
+    agents/
+      analyst.py
+      reviewer.py
+    risk/
+      policy.py
+      sizing.py
+      guardrails.py
+    execution/
+      executor.py
+      order_manager.py
+    memory/
+      journal.py
+      lessons.py
+      policy_registry.py
+    evaluation/
+      scorer.py
+      replay.py
+      challenger.py
+    infra/
+      logging.py
+      metrics.py
+      scheduler.py
+  tests/
+    unit/
+    integration/
+    replay/
+```
+
+## 12. Implementation Phases
+
+### Phase 0: Foundations
+
+Deliverables:
+
+- repo structure
+- configuration system
+- environment variable handling
+- Alpaca paper client
+- basic logging
+- base schemas
+
+### Phase 1: Market and Account Plumbing
+
+Deliverables:
+
+- crypto market data stream for `ETH/USD`
+- periodic account and position sync
+- normalized internal state object
+- health checks for connection quality
+
+### Phase 2: Execution and Risk
+
+Deliverables:
+
+- paper order placement
+- order update handling
+- risk policy engine
+- kill switch
+- cooldown and anti-overtrading rules
+
+### Phase 3: Analyst Layer
+
+Deliverables:
+
+- feature pipeline
+- analyst prompt and structured decision schema
+- strategy decision cadence
+- decision logging
+
+### Phase 4: Journal and Review
+
+Deliverables:
+
+- trade journal schema
+- post-trade labeling
+- review job
+- lesson extraction
+
+### Phase 5: Evaluation and Improvement
+
+Deliverables:
+
+- replay framework
+- benchmark metrics
+- candidate policy comparison
+- promotion rules
+
+### Phase 6: Hardening
+
+Deliverables:
+
+- fault tolerance
+- restart recovery
+- stale-data handling
+- long-run monitoring
+
+## 13. First Milestone Build Order
+
+Build in this exact order:
+
+1. Connect to Alpaca and stream `ETH/USD`.
+2. Build a simple account state fetcher.
+3. Submit and track a manual paper order.
+4. Implement journal logging for all decisions and fills.
+5. Add a simple deterministic strategy baseline.
+6. Add risk rules and anti-overtrading logic.
+7. Add the analyst service.
+8. Add post-trade review and lesson extraction.
+9. Add offline policy comparison.
+
+## 14. Initial Success Criteria
+
+The first research version is successful if it can:
+
+- run continuously without crashing
+- stay within Alpaca free-tier limits
+- keep portfolio state accurate
+- reject unsafe trades reliably
+- log every decision and every order event
+- produce reproducible post-trade reviews
+- improve only through explicit versioned updates
+
+## 15. Open Questions for Later
+
+- should the first version trade both directions or start long-only
+- what decision interval should be used
+- which exact features should gate analyst calls
+- how should expected edge be estimated before order submission
+- what evaluation horizon should define success for a trade idea
+- when should candidate policies be promoted
+
+## 16. Immediate Next Steps
+
+1. Create the initial project scaffolding.
+2. Implement Alpaca configuration and paper client.
+3. Implement `ETH/USD` crypto WebSocket ingestion.
+4. Implement account and positions synchronization.
+5. Implement order placement and order update handling.
+6. Add deterministic risk and cooldown logic.
+7. Add decision journaling before introducing the LLM.

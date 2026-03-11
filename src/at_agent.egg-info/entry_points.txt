@@ -1,0 +1,4 @@
+[console_scripts]
+at-agent = app.main:main
+at-agent-evaluate = app.evaluate:main
+at-agent-review = app.review:main
