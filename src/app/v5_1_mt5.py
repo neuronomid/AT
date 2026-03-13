@@ -1750,12 +1750,7 @@ async def _run_entry_protection_cycle(
     shadow_mode: bool,
     logger,
 ) -> bool:
-    tickets = [
-        ticket
-        for ticket in registry.all(snapshot.symbol)
-        if (ticket.partial_stage == 0 and ticket.stop_loss is None)
-        or (ticket.partial_stage >= 1 and (ticket.stop_loss is None or ticket.take_profit is None))
-    ]
+    tickets = registry.all(snapshot.symbol)
     if not tickets:
         return False
     pending_symbol_command = await bridge_state.has_pending_symbol(snapshot.symbol)
@@ -1763,19 +1758,24 @@ async def _run_entry_protection_cycle(
         return False
 
     for ticket in tickets:
-        reason = (
-            "Restore broker-safe protection on a reduced ticket."
-            if ticket.partial_stage >= 1
-            else "Attach the initial broker-safe stop after entry fill."
-        )
         command = planner.build_protection_command(
             ticket=ticket,
             snapshot=snapshot,
-            reason=reason,
+            reason=(
+                "Restore broker-safe protection on a reduced ticket."
+                if ticket.partial_stage >= 1
+                else "Attach the broker-safe stop and target after entry fill."
+            ),
             created_at=snapshot.server_time,
             expires_at=snapshot.server_time + timedelta(seconds=60),
         )
         if command is None:
+            continue
+        if _levels_match(ticket.stop_loss, command.stop_loss, tick_size=snapshot.symbol_spec.tick_size) and _levels_match(
+            ticket.take_profit,
+            command.take_profit,
+            tick_size=snapshot.symbol_spec.tick_size,
+        ):
             continue
         if shadow_mode:
             event_journal.record(
@@ -1807,6 +1807,12 @@ async def _run_entry_protection_cycle(
             )
         return True
     return False
+
+
+def _levels_match(current: Decimal | None, desired: Decimal | None, *, tick_size: Decimal) -> bool:
+    if current is None or desired is None:
+        return current is desired
+    return abs(current - desired) < tick_size
 
 async def _run_auto_scalp_cycle(
     *,
@@ -1954,7 +1960,10 @@ async def _start_bridge_server(*, app, host: str, port: int) -> tuple[uvicorn.Se
 
 
 def main() -> None:
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        return
 
 
 if __name__ == "__main__":

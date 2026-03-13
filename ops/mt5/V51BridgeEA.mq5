@@ -195,6 +195,13 @@ bool ExecuteClose(long ticket, double volume, double &fill_price, double &fill_v
 
 long ResolvePositionTicket(string symbol, long magic_number, string comment)
 {
+   long matched_by_magic = 0;
+   long matched_by_comment_prefix = 0;
+   string comment_prefix = comment;
+   int separator = StringFind(comment_prefix, "|", 4);
+   if(separator > 0)
+      comment_prefix = StringSubstr(comment_prefix, 0, separator);
+
    for(int index = 0; index < PositionsTotal(); index++)
    {
       ulong ticket = PositionGetTicket(index);
@@ -204,11 +211,17 @@ long ResolvePositionTicket(string symbol, long magic_number, string comment)
          continue;
       if((long)PositionGetInteger(POSITION_MAGIC) != magic_number)
          continue;
-      if(PositionGetString(POSITION_COMMENT) != comment)
-         continue;
-      return((long)ticket);
+      string live_comment = PositionGetString(POSITION_COMMENT);
+      if(live_comment == comment)
+         return((long)ticket);
+      if(comment_prefix != "" && StringFind(live_comment, comment_prefix) == 0)
+         matched_by_comment_prefix = (long)ticket;
+      if(matched_by_magic == 0)
+         matched_by_magic = (long)ticket;
    }
-   return(0);
+   if(matched_by_comment_prefix != 0)
+      return(matched_by_comment_prefix);
+   return(matched_by_magic);
 }
 
 void PostAck(string command_id, string status, long ticket_id, string message, double fill_price, double fill_volume)

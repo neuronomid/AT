@@ -161,7 +161,7 @@ class MT5V51EntryPlanner:
                 "soft_take_profit_1": float(plan.soft_take_profit_1),
                 "soft_take_profit_2": float(plan.soft_take_profit_2),
                 "hard_take_profit": float(plan.take_profit),
-                "attach_protection_after_fill": False,
+                "attach_protection_after_fill": True,
                 "thesis_tags": thesis_tags,
                 "context_signature": context_signature,
                 "followed_lessons": followed_lessons,
@@ -187,10 +187,10 @@ class MT5V51EntryPlanner:
             stop_loss, take_profit = levels
             action = "attach_post_partial_protection"
         else:
-            stop_loss = self._initial_protection_stop(ticket=ticket, snapshot=snapshot)
-            if stop_loss is None:
+            levels = self._initial_protection_levels(ticket=ticket, snapshot=snapshot)
+            if levels is None:
                 return None
-            take_profit = None
+            stop_loss, take_profit = levels
         if stop_loss is None:
             return None
         return MT5V51BridgeCommand(
@@ -207,26 +207,30 @@ class MT5V51EntryPlanner:
             metadata={"action": action},
         )
 
-    def _initial_protection_stop(
+    def _initial_protection_levels(
         self,
         *,
         ticket: MT5V51TicketRecord,
         snapshot: MT5V51BridgeSnapshot,
-    ) -> Decimal | None:
+    ) -> tuple[Decimal, Decimal] | None:
         min_distance = self._minimum_broker_protection_distance(snapshot)
         tick_size = snapshot.symbol_spec.tick_size
         if ticket.side == "long":
             max_valid_stop = self._round_down_to_tick(snapshot.bid - min_distance, tick_size)
+            min_valid_take_profit = self._round_up_to_tick(snapshot.ask + min_distance, tick_size)
             stop_loss = min(self._round_down_to_tick(ticket.initial_stop_loss, tick_size), max_valid_stop)
-            if stop_loss <= 0 or stop_loss >= snapshot.bid:
+            take_profit = max(self._round_up_to_tick(ticket.hard_take_profit, tick_size), min_valid_take_profit)
+            if stop_loss <= 0 or stop_loss >= snapshot.bid or take_profit <= snapshot.ask:
                 return None
-            return stop_loss
+            return stop_loss, take_profit
 
         min_valid_stop = self._round_up_to_tick(snapshot.ask + min_distance, tick_size)
+        max_valid_take_profit = self._round_down_to_tick(snapshot.bid - min_distance, tick_size)
         stop_loss = max(self._round_up_to_tick(ticket.initial_stop_loss, tick_size), min_valid_stop)
-        if stop_loss <= snapshot.ask:
+        take_profit = min(self._round_down_to_tick(ticket.hard_take_profit, tick_size), max_valid_take_profit)
+        if stop_loss <= snapshot.ask or take_profit <= 0 or take_profit >= snapshot.bid:
             return None
-        return stop_loss
+        return stop_loss, take_profit
 
     def _post_partial_protection_levels(
         self,

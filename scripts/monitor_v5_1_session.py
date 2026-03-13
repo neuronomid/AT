@@ -9,39 +9,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import duckdb
-import pandas as pd
-
-
-EVENT_COLUMNS = [
-    "recorded_at",
-    "record_type",
-    "snapshot_symbol",
-    "snapshot_spread_bps",
-    "snapshot_server_time",
-    "snapshot_open_tickets",
-    "snapshot_pending_commands",
-    "account_balance",
-    "account_equity",
-    "account_free_margin",
-    "account_open_profit",
-    "entry_action",
-    "entry_confidence",
-    "risk_approved",
-    "risk_reason",
-    "ack_status",
-    "ack_message",
-]
-
-REFLECTION_COLUMNS = [
-    "recorded_at",
-    "closed_at",
-    "side",
-    "exit_reason",
-    "realized_pnl_usd",
-    "realized_r",
-]
-
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Summarize a V5.1 MT5 session from JSONL artifacts.")
@@ -73,6 +40,13 @@ def _coerce_datetime(value: Any) -> datetime | None:
         except ValueError:
             return None
     return None
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _age_seconds(value: datetime | None, *, now: datetime) -> float | None:
@@ -109,57 +83,6 @@ def _jsonl_records(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def _flatten_event_records(records: list[dict[str, Any]]) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
-    for row in records:
-        snapshot = row.get("snapshot", {}) if isinstance(row.get("snapshot"), dict) else {}
-        account = snapshot.get("account", {}) if isinstance(snapshot.get("account"), dict) else {}
-        decision = row.get("decision", {}) if isinstance(row.get("decision"), dict) else {}
-        risk_decision = row.get("risk_decision", {}) if isinstance(row.get("risk_decision"), dict) else {}
-        ack = row.get("ack", {}) if isinstance(row.get("ack"), dict) else {}
-        open_tickets = snapshot.get("open_tickets", []) if isinstance(snapshot.get("open_tickets"), list) else []
-        pending_commands = snapshot.get("pending_command_ids", []) if isinstance(snapshot.get("pending_command_ids"), list) else []
-        rows.append(
-            {
-                "recorded_at": row.get("recorded_at"),
-                "record_type": row.get("record_type"),
-                "snapshot_symbol": snapshot.get("symbol"),
-                "snapshot_spread_bps": snapshot.get("spread_bps"),
-                "snapshot_server_time": snapshot.get("server_time"),
-                "snapshot_open_tickets": len(open_tickets),
-                "snapshot_pending_commands": len(pending_commands),
-                "account_balance": account.get("balance"),
-                "account_equity": account.get("equity"),
-                "account_free_margin": account.get("free_margin"),
-                "account_open_profit": account.get("open_profit"),
-                "entry_action": decision.get("action"),
-                "entry_confidence": decision.get("confidence"),
-                "risk_approved": risk_decision.get("approved"),
-                "risk_reason": risk_decision.get("reason"),
-                "ack_status": ack.get("status"),
-                "ack_message": ack.get("message"),
-            }
-        )
-    return pd.DataFrame(rows, columns=EVENT_COLUMNS)
-
-
-def _flatten_reflection_records(records: list[dict[str, Any]]) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
-    for row in records:
-        reflection = row.get("reflection", {}) if isinstance(row.get("reflection"), dict) else {}
-        rows.append(
-            {
-                "recorded_at": row.get("recorded_at"),
-                "closed_at": reflection.get("closed_at"),
-                "side": reflection.get("side"),
-                "exit_reason": reflection.get("exit_reason"),
-                "realized_pnl_usd": reflection.get("realized_pnl_usd"),
-                "realized_r": reflection.get("realized_r"),
-            }
-        )
-    return pd.DataFrame(rows, columns=REFLECTION_COLUMNS)
-
-
 def _latest_snapshot_record(records: list[dict[str, Any]]) -> dict[str, Any] | None:
     for row in reversed(records):
         if row.get("record_type") == "mt5_v51_bridge_snapshot":
@@ -167,135 +90,116 @@ def _latest_snapshot_record(records: list[dict[str, Any]]) -> dict[str, Any] | N
     return None
 
 
-def _fetch_event_counts(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
-    rows = con.execute(
-        """
-        select record_type, count(*) as event_count
-        from events
-        where record_type is not null
-        group by 1
-        """,
-    ).fetchall()
-    return {str(record_type): int(event_count) for record_type, event_count in rows}
+def _fetch_event_counts(records: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in records:
+        record_type = row.get("record_type")
+        if not isinstance(record_type, str) or not record_type:
+            continue
+        counts[record_type] = counts.get(record_type, 0) + 1
+    return counts
 
 
-def _fetch_entry_summary(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
-    row = con.execute(
-        """
-        select
-            count(*) filter (where record_type = 'mt5_v51_entry_analysis') as analyses,
-            count(*) filter (where record_type = 'mt5_v51_entry_execution') as executions,
-            count(*) filter (
-                where record_type = 'mt5_v51_entry_execution'
-                and coalesce(risk_approved, false)
-            ) as approved,
-            count(*) filter (
-                where record_type = 'mt5_v51_entry_execution'
-                and not coalesce(risk_approved, false)
-            ) as rejected
-        from events
-        """,
-    ).fetchone()
-    rejection_rows = con.execute(
-        """
-        select risk_reason as reason, count(*) as rejection_count
-        from events
-        where record_type = 'mt5_v51_entry_execution'
-          and not coalesce(risk_approved, false)
-          and risk_reason is not null
-        group by 1
-        order by 2 desc, 1
-        limit 3
-        """,
-    ).fetchall()
-    recent_rows = con.execute(
-        """
-        select
-            recorded_at,
-            entry_action,
-            entry_confidence,
-            coalesce(risk_approved, false) as approved,
-            risk_reason
-        from events
-        where record_type = 'mt5_v51_entry_execution'
-        order by try_cast(recorded_at as timestamptz) desc
-        limit 5
-        """,
-    ).fetchall()
-    return {
-        "analyses": int(row[0] or 0),
-        "executions": int(row[1] or 0),
-        "approved": int(row[2] or 0),
-        "rejected": int(row[3] or 0),
-        "rejection_reasons": [(str(reason), int(count)) for reason, count in rejection_rows],
-        "recent": [
+def _fetch_entry_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    analyses = 0
+    executions = 0
+    approved = 0
+    rejected = 0
+    rejection_counts: dict[str, int] = {}
+    recent: list[dict[str, Any]] = []
+
+    for row in records:
+        record_type = row.get("record_type")
+        if record_type == "mt5_v51_entry_analysis":
+            analyses += 1
+            continue
+        if record_type != "mt5_v51_entry_execution":
+            continue
+
+        executions += 1
+        decision = row.get("decision", {}) if isinstance(row.get("decision"), dict) else {}
+        risk_decision = row.get("risk_decision", {}) if isinstance(row.get("risk_decision"), dict) else {}
+        approved_flag = bool(risk_decision.get("approved"))
+        if approved_flag:
+            approved += 1
+        else:
+            rejected += 1
+            reason = risk_decision.get("reason")
+            if isinstance(reason, str) and reason:
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+
+        recent.append(
             {
-                "recorded_at": recorded_at,
-                "action": action,
-                "confidence": float(confidence or 0.0),
-                "approved": bool(approved),
-                "reason": reason,
+                "recorded_at": row.get("recorded_at"),
+                "action": decision.get("action"),
+                "confidence": _safe_float(decision.get("confidence")),
+                "approved": approved_flag,
+                "reason": risk_decision.get("reason"),
             }
-            for recorded_at, action, confidence, approved, reason in recent_rows
-        ],
+        )
+
+    recent.sort(key=lambda row: _coerce_datetime(row.get("recorded_at")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    rejection_rows = sorted(rejection_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
+    return {
+        "analyses": analyses,
+        "executions": executions,
+        "approved": approved,
+        "rejected": rejected,
+        "rejection_reasons": rejection_rows,
+        "recent": recent[:5],
     }
 
 
-def _fetch_ack_summary(con: duckdb.DuckDBPyConnection) -> list[tuple[str, int]]:
-    rows = con.execute(
-        """
-        select ack_status as status, count(*) as ack_count
-        from events
-        where record_type = 'mt5_v51_bridge_ack'
-          and ack_status is not null
-        group by 1
-        order by 2 desc, 1
-        """,
-    ).fetchall()
-    return [(str(status), int(ack_count)) for status, ack_count in rows]
+def _fetch_ack_summary(records: list[dict[str, Any]]) -> list[tuple[str, int]]:
+    counts: dict[str, int] = {}
+    for row in records:
+        if row.get("record_type") != "mt5_v51_bridge_ack":
+            continue
+        ack = row.get("ack", {}) if isinstance(row.get("ack"), dict) else {}
+        status = ack.get("status")
+        if not isinstance(status, str) or not status:
+            continue
+        counts[status] = counts.get(status, 0) + 1
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
 
 
-def _fetch_trade_summary(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
-    row = con.execute(
-        """
-        select
-            count(*) as trade_count,
-            count(*) filter (where try_cast(realized_pnl_usd as double) > 0) as wins,
-            count(*) filter (where try_cast(realized_pnl_usd as double) < 0) as losses,
-            coalesce(sum(try_cast(realized_pnl_usd as double)), 0) as realized_pnl_usd,
-            coalesce(avg(try_cast(realized_r as double)), 0) as avg_realized_r
-        from reflections
-        """,
-    ).fetchone()
-    recent_rows = con.execute(
-        """
-        select
-            closed_at,
-            side,
-            exit_reason,
-            try_cast(realized_pnl_usd as double),
-            try_cast(realized_r as double)
-        from reflections
-        order by try_cast(closed_at as timestamptz) desc
-        limit 5
-        """,
-    ).fetchall()
-    return {
-        "count": int(row[0] or 0),
-        "wins": int(row[1] or 0),
-        "losses": int(row[2] or 0),
-        "realized_pnl_usd": float(row[3] or 0.0),
-        "avg_realized_r": float(row[4] or 0.0),
-        "recent": [
+def _fetch_trade_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    wins = 0
+    losses = 0
+    realized_pnl_usd = 0.0
+    realized_r_total = 0.0
+    realized_r_count = 0
+    recent: list[dict[str, Any]] = []
+
+    for row in records:
+        reflection = row.get("reflection", {}) if isinstance(row.get("reflection"), dict) else {}
+        pnl = _safe_float(reflection.get("realized_pnl_usd"))
+        realized_r = _safe_float(reflection.get("realized_r"))
+        if pnl > 0:
+            wins += 1
+        elif pnl < 0:
+            losses += 1
+        realized_pnl_usd += pnl
+        realized_r_total += realized_r
+        realized_r_count += 1
+        recent.append(
             {
-                "closed_at": closed_at,
-                "side": side,
-                "exit_reason": exit_reason,
-                "realized_pnl_usd": float(realized_pnl_usd or 0.0),
-                "realized_r": float(realized_r or 0.0),
+                "closed_at": reflection.get("closed_at"),
+                "side": reflection.get("side"),
+                "exit_reason": reflection.get("exit_reason"),
+                "realized_pnl_usd": pnl,
+                "realized_r": realized_r,
             }
-            for closed_at, side, exit_reason, realized_pnl_usd, realized_r in recent_rows
-        ],
+        )
+
+    recent.sort(key=lambda row: _coerce_datetime(row.get("closed_at")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    return {
+        "count": len(records),
+        "wins": wins,
+        "losses": losses,
+        "realized_pnl_usd": realized_pnl_usd,
+        "avg_realized_r": (realized_r_total / realized_r_count) if realized_r_count else 0.0,
+        "recent": recent[:5],
     }
 
 
@@ -318,12 +222,8 @@ def _build_warnings(
     if snapshot_age is not None and snapshot_age > 10:
         warnings.append(f"Latest snapshot record is stale at {_format_age(snapshot_age)}.")
 
-    spread_bps = snapshot_payload.get("spread_bps")
-    try:
-        spread_value = float(spread_bps)
-    except (TypeError, ValueError):
-        spread_value = None
-    if spread_value is not None and spread_value >= 12.0:
+    spread_value = _safe_float(snapshot_payload.get("spread_bps"))
+    if spread_value >= 12.0:
         warnings.append(f"Latest spread is wide at {spread_value:.2f} bps.")
 
     pending_command_ids = snapshot_payload.get("pending_command_ids", [])
@@ -354,31 +254,10 @@ def _print_report(*, session_dir: Path, tail_count: int) -> None:
 
     event_records = _jsonl_records(events_path)
     reflection_records = _jsonl_records(reflections_path)
-    events_df = _flatten_event_records(event_records)
-    reflections_df = _flatten_reflection_records(reflection_records)
-
-    con = duckdb.connect()
-    con.register("events", events_df)
-    con.register("reflections", reflections_df)
-
-    event_counts = _fetch_event_counts(con) if not events_df.empty else {}
-    entry_summary = _fetch_entry_summary(con) if not events_df.empty else {
-        "analyses": 0,
-        "executions": 0,
-        "approved": 0,
-        "rejected": 0,
-        "rejection_reasons": [],
-        "recent": [],
-    }
-    ack_summary = _fetch_ack_summary(con) if not events_df.empty else []
-    trade_summary = _fetch_trade_summary(con) if not reflections_df.empty else {
-        "count": 0,
-        "wins": 0,
-        "losses": 0,
-        "realized_pnl_usd": 0.0,
-        "avg_realized_r": 0.0,
-        "recent": [],
-    }
+    event_counts = _fetch_event_counts(event_records)
+    entry_summary = _fetch_entry_summary(event_records)
+    ack_summary = _fetch_ack_summary(event_records)
+    trade_summary = _fetch_trade_summary(reflection_records)
     latest_snapshot = _latest_snapshot_record(event_records)
     warnings = _build_warnings(
         now=now,
@@ -467,8 +346,6 @@ def _print_report(*, session_dir: Path, tail_count: int) -> None:
             print(f"  - {warning}")
     else:
         print("Warnings: none")
-
-    con.close()
 
 
 def main() -> None:

@@ -63,15 +63,17 @@ class MT5V51TicketRegistry:
         if not self._has_live_ticket_id(ack.ticket_id):
             plan = pending["plan"]
             if ack.fill_price is not None:
-                plan["acked_fill_price"] = ack.fill_price
+                normalized = self._normalize_plan_payload(plan=plan, fill_price=Decimal(str(ack.fill_price)))
+                plan.clear()
+                plan.update(normalized)
             if ack.fill_volume_lots is not None:
                 plan["acked_fill_volume_lots"] = ack.fill_volume_lots
             if ack.broker_time is not None:
                 plan["acked_opened_at"] = ack.broker_time
             return
-        plan = dict(pending["plan"])
+        fill_price = Decimal(str(ack.fill_price or pending["plan"]["entry_price"]))
+        plan = self._normalize_plan_payload(plan=dict(pending["plan"]), fill_price=fill_price)
         command = dict(pending["command"])
-        fill_price = Decimal(str(ack.fill_price or plan["entry_price"]))
         opened_at = ack.broker_time or datetime.now(timezone.utc)
         entry_stop_loss = command.get("stop_loss")
         entry_take_profit = command.get("take_profit")
@@ -99,7 +101,7 @@ class MT5V51TicketRegistry:
             thesis_tags=list(plan.get("thesis_tags", [])),
             context_signature=plan.get("context_signature"),
             followed_lessons=list(plan.get("followed_lessons", [])),
-            metadata=dict(plan),
+            metadata=self._payload_metadata(plan),
             opened_at=opened_at,
             last_seen_at=opened_at,
             unrealized_pnl_usd=Decimal("0"),
@@ -246,35 +248,44 @@ class MT5V51TicketRegistry:
         payload: dict[str, Any] | None,
         entry_command_id: str | None,
     ) -> MT5V51TicketRecord:
-        metadata = dict((payload or {}).get("metadata", {}))
+        normalized_payload = self._normalize_plan_payload(plan=dict(payload or {}), fill_price=None) if payload else None
+        metadata = self._payload_metadata(normalized_payload)
         entry_price = (
-            Decimal(str((payload or {}).get("acked_fill_price", (payload or {}).get("metadata", {}).get("entry_price", live.open_price)))
+            Decimal(str((normalized_payload or {}).get("acked_fill_price", metadata.get("entry_price", live.open_price)))
             )
-            if payload
+            if normalized_payload
             else live.open_price
         )
-        stop_loss = live.stop_loss
-        if stop_loss is None and "initial_stop_loss" in metadata:
-            stop_loss = Decimal(str(metadata["initial_stop_loss"]))
-        hard_tp = live.take_profit
-        if hard_tp is None and "hard_take_profit" in metadata:
-            hard_tp = Decimal(str(metadata["hard_take_profit"]))
+        desired_stop_loss = None
+        if "initial_stop_loss" in metadata:
+            desired_stop_loss = Decimal(str(metadata["initial_stop_loss"]))
+        elif "stop_loss" in metadata:
+            desired_stop_loss = Decimal(str(metadata["stop_loss"]))
+        else:
+            desired_stop_loss = live.stop_loss
+        desired_hard_tp = None
+        if "hard_take_profit" in metadata:
+            desired_hard_tp = Decimal(str(metadata["hard_take_profit"]))
+        elif "take_profit" in metadata:
+            desired_hard_tp = Decimal(str(metadata["take_profit"]))
+        else:
+            desired_hard_tp = live.take_profit
         r_distance = self._resolve_r_distance(
             live=live,
             snapshot=snapshot,
             entry_price=entry_price,
-            stop_loss=stop_loss,
+            stop_loss=desired_stop_loss,
             metadata=metadata,
         )
-        if stop_loss is None:
-            stop_loss = self._default_stop_from_r(entry_price=entry_price, r_distance=r_distance, side=live.side)
-        if hard_tp is None:
-            hard_tp = self._default_soft_target(entry_price, stop_loss, side=live.side, multiple=Decimal("1.0"))
+        if desired_stop_loss is None:
+            desired_stop_loss = self._default_stop_from_r(entry_price=entry_price, r_distance=r_distance, side=live.side)
+        if desired_hard_tp is None:
+            desired_hard_tp = self._default_soft_target(entry_price, desired_stop_loss, side=live.side, multiple=Decimal("1.0"))
         soft_tp1 = Decimal(
             str(
                 metadata.get(
                     "soft_take_profit_1",
-                    self._default_soft_target(entry_price, stop_loss, side=live.side, multiple=Decimal("0.5")),
+                    self._default_soft_target(entry_price, desired_stop_loss, side=live.side, multiple=Decimal("0.5")),
                 )
             )
         )
@@ -282,15 +293,15 @@ class MT5V51TicketRegistry:
             str(
                 metadata.get(
                     "soft_take_profit_2",
-                    self._default_soft_target(entry_price, stop_loss, side=live.side, multiple=Decimal("1.0")),
+                    self._default_soft_target(entry_price, desired_stop_loss, side=live.side, multiple=Decimal("1.0")),
                 )
             )
         )
         risk_amount_usd = Decimal(str(metadata.get("risk_amount_usd", self._fallback_risk_amount(live=live, snapshot=snapshot, r_distance=r_distance))))
-        volume = Decimal(str((payload or {}).get("acked_fill_volume_lots", (payload or {}).get("volume_lots", live.volume_lots))))
+        volume = Decimal(str((normalized_payload or {}).get("acked_fill_volume_lots", (normalized_payload or {}).get("volume_lots", live.volume_lots))))
         opened_at = (
-            (payload or {}).get("acked_opened_at")
-            if payload and (payload or {}).get("acked_opened_at") is not None
+            (normalized_payload or {}).get("acked_opened_at")
+            if normalized_payload and (normalized_payload or {}).get("acked_opened_at") is not None
             else (live.opened_at or snapshot.server_time)
         )
         return MT5V51TicketRecord(
@@ -306,8 +317,8 @@ class MT5V51TicketRegistry:
             current_price=live.current_price or live.open_price,
             stop_loss=live.stop_loss,
             take_profit=live.take_profit,
-            initial_stop_loss=stop_loss,
-            hard_take_profit=hard_tp,
+            initial_stop_loss=desired_stop_loss,
+            hard_take_profit=desired_hard_tp,
             soft_take_profit_1=soft_tp1,
             soft_take_profit_2=soft_tp2,
             r_distance_price=r_distance,
@@ -323,6 +334,15 @@ class MT5V51TicketRegistry:
             unrealized_pnl_usd=live.unrealized_pnl_usd,
             unrealized_r=0.0,
         )
+
+    def _payload_metadata(self, payload: dict[str, Any] | None) -> dict[str, Any]:
+        if payload is None:
+            return {}
+        metadata = dict(payload)
+        nested = metadata.pop("metadata", {})
+        if isinstance(nested, dict):
+            metadata.update(nested)
+        return metadata
 
     def _update_record(
         self,
@@ -421,6 +441,103 @@ class MT5V51TicketRegistry:
         if side == "long":
             return entry_price - r_distance
         return entry_price + r_distance
+
+    def _normalize_plan_payload(
+        self,
+        *,
+        plan: dict[str, Any],
+        fill_price: Decimal | None,
+    ) -> dict[str, Any]:
+        if not plan:
+            return {}
+        normalized = dict(plan)
+        if fill_price is None and normalized.get("acked_fill_price") is not None:
+            fill_price = Decimal(str(normalized["acked_fill_price"]))
+        if fill_price is None:
+            return normalized
+
+        side = str(normalized.get("side", "long"))
+        original_entry_price = Decimal(str(normalized.get("entry_price", fill_price)))
+        r_distance = Decimal(str(normalized.get("r_distance_price", "0")))
+        if r_distance <= 0:
+            stop_loss = normalized.get("stop_loss")
+            if stop_loss is not None:
+                r_distance = abs(fill_price - Decimal(str(stop_loss)))
+        if r_distance <= 0:
+            return normalized
+
+        hard_target_r = self._target_multiple(
+            target_price=normalized.get("hard_take_profit", normalized.get("take_profit")),
+            entry_price=original_entry_price,
+            r_distance=r_distance,
+            fallback=self._partial_target_r,
+        )
+        soft_target_r_1 = self._target_multiple(
+            target_price=normalized.get("soft_take_profit_1"),
+            entry_price=original_entry_price,
+            r_distance=r_distance,
+            fallback=hard_target_r,
+        )
+        soft_target_r_2 = self._target_multiple(
+            target_price=normalized.get("soft_take_profit_2"),
+            entry_price=original_entry_price,
+            r_distance=r_distance,
+            fallback=hard_target_r,
+        )
+
+        if side == "long":
+            stop_loss = fill_price - r_distance
+            hard_take_profit = fill_price + (r_distance * hard_target_r)
+            soft_take_profit_1 = fill_price + (r_distance * soft_target_r_1)
+            soft_take_profit_2 = fill_price + (r_distance * soft_target_r_2)
+        else:
+            stop_loss = fill_price + r_distance
+            hard_take_profit = fill_price - (r_distance * hard_target_r)
+            soft_take_profit_1 = fill_price - (r_distance * soft_target_r_1)
+            soft_take_profit_2 = fill_price - (r_distance * soft_target_r_2)
+
+        normalized.update(
+            {
+                "entry_price": fill_price,
+                "acked_fill_price": fill_price,
+                "stop_loss": stop_loss,
+                "take_profit": hard_take_profit,
+                "hard_take_profit": hard_take_profit,
+                "soft_take_profit_1": soft_take_profit_1,
+                "soft_take_profit_2": soft_take_profit_2,
+                "r_distance_price": r_distance,
+                "normalized_after_fill": True,
+            }
+        )
+        metadata = dict(normalized.get("metadata", {})) if isinstance(normalized.get("metadata"), dict) else {}
+        metadata.update(
+            {
+                "entry_price": fill_price,
+                "initial_stop_loss": stop_loss,
+                "hard_take_profit": hard_take_profit,
+                "soft_take_profit_1": soft_take_profit_1,
+                "soft_take_profit_2": soft_take_profit_2,
+                "r_distance_price": r_distance,
+                "normalized_after_fill": True,
+            }
+        )
+        normalized["metadata"] = metadata
+        return normalized
+
+    def _target_multiple(
+        self,
+        *,
+        target_price: Any,
+        entry_price: Decimal,
+        r_distance: Decimal,
+        fallback: Decimal,
+    ) -> Decimal:
+        if target_price is None or r_distance <= 0:
+            return fallback
+        distance = abs(Decimal(str(target_price)) - entry_price)
+        if distance <= 0:
+            return fallback
+        return distance / r_distance
 
     def _has_live_ticket_id(self, ticket_id: str | None) -> bool:
         if ticket_id is None:

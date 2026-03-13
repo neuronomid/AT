@@ -125,7 +125,7 @@ def test_mt5_v51_entry_planner_builds_long_and_short_plans() -> None:
     assert long_command.stop_loss == long_plan.stop_loss
     assert long_command.take_profit == long_plan.take_profit
     assert long_command.metadata["initial_stop_loss"] == float(long_plan.stop_loss)
-    assert long_command.metadata["attach_protection_after_fill"] is False
+    assert long_command.metadata["attach_protection_after_fill"] is True
 
     ticket = MT5V51TicketRecord(
         ticket_id="1001",
@@ -160,7 +160,7 @@ def test_mt5_v51_entry_planner_builds_long_and_short_plans() -> None:
 
     assert initial_protection is not None
     assert initial_protection.stop_loss is not None
-    assert initial_protection.take_profit is None
+    assert initial_protection.take_profit is not None
 
 
 def test_mt5_v51_entry_planner_never_places_initial_stops_inside_broker_minimum() -> None:
