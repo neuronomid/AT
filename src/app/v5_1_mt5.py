@@ -16,6 +16,7 @@ from data.mt5_v51_schemas import (
     MT5V51BridgeCommand,
     MT5V51BridgeSnapshot,
     MT5V51EntryDecision,
+    MT5V51RiskDecision,
     MT5V51TicketRecord,
 )
 from data.schemas import LessonRecord, TradeReflection
@@ -79,6 +80,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--duration-minutes", type=int, default=0)
     parser.add_argument("--session-tag", default=None)
     parser.add_argument("--enable-trade-commands", action="store_true")
+    parser.add_argument("--shadow-mode", action="store_true")
     parser.add_argument("--bridge-host", default=None)
     parser.add_argument("--bridge-port", type=int, default=None)
     return parser.parse_args()
@@ -98,8 +100,19 @@ def _latest_entry_bar_end(snapshot: MT5V51BridgeSnapshot) -> datetime | None:
     return snapshot.bars_1m[-1].end_at if snapshot.bars_1m else None
 
 
-def _entry_analysis_budget_seconds(*, timeout_seconds: int) -> float:
-    return max(0.1, float(timeout_seconds))
+def _entry_analysis_budget_seconds(
+    *,
+    timeout_seconds: int,
+    max_signal_age_seconds: int | None = None,
+    execution_grace_seconds: int = 0,
+) -> float:
+    budget_seconds = max(0.1, float(timeout_seconds))
+    if max_signal_age_seconds is None or max_signal_age_seconds <= 0:
+        return budget_seconds
+
+    grace_seconds = max(float(execution_grace_seconds), 0.0)
+    freshness_budget = max(0.1, float(max_signal_age_seconds) - grace_seconds)
+    return min(budget_seconds, freshness_budget)
 
 
 def _entry_command_expires_at(snapshot: MT5V51BridgeSnapshot, *, stale_after_seconds: int) -> datetime:
@@ -149,8 +162,44 @@ def _coerce_bool(value: object) -> bool:
     return bool(value) if isinstance(value, bool) else False
 
 
+def _regime_payload(packet: dict[str, object]) -> dict[str, object]:
+    return _coerce_dict(packet.get("trend_regime"))
+
+
+def _regime_supports_direction(regime: dict[str, object], *, direction: str) -> bool:
+    if not _coerce_bool(regime.get("tradeable")):
+        return False
+    if str(regime.get("primary_direction", "flat")) != direction:
+        return False
+    if _coerce_float(regime.get("chop_score")) > 3.0:
+        return False
+    return _coerce_float(regime.get("trend_quality_score")) >= 8.0
+
+
+def _regime_supports_action(packet: dict[str, object], *, action: str) -> bool:
+    regime = _regime_payload(packet)
+    if action == "enter_long":
+        return _regime_supports_direction(regime, direction="bull")
+    if action == "enter_short":
+        return _regime_supports_direction(regime, direction="bear")
+    return True
+
+
+def _regime_is_exceptionally_strong_against_backdrop(regime: dict[str, object], *, direction: str) -> bool:
+    return (
+        _regime_supports_direction(regime, direction=direction)
+        and _coerce_float(regime.get("trend_quality_score")) >= 11.0
+        and _coerce_float(regime.get("alignment_score")) >= 2.0
+        and _coerce_float(regime.get("chop_score")) <= 2.0
+    )
+
+
 def _freshness_allows_scalp_entry(value: object) -> bool:
     return str(value).strip().lower() in {"fresh", "aging"}
+
+
+def _freshness_allows_execution(value: object) -> bool:
+    return str(value).strip().lower() in {"fresh", "aging", "stale_soon"}
 
 
 def _spread_cost_allows_scalp_entry(*, quote: dict[str, object], microstructure: dict[str, object]) -> bool:
@@ -219,12 +268,97 @@ def _aggressive_micro_opposition(summary: dict[str, object], *, direction: str) 
     )
 
 
-def _override_risk_fraction(risk_posture: str) -> float:
-    if risk_posture == "mildly_aggressive":
-        return 0.0045
-    if risk_posture == "reduced":
-        return 0.0025
-    return 0.0035
+def _risk_bounds_for_setup_quality(setup_quality: str) -> tuple[float, float] | None:
+    if setup_quality == "strong":
+        return 0.005, 0.005
+    if setup_quality == "normal":
+        return 0.002, 0.003
+    if setup_quality == "weak":
+        return 0.001, 0.002
+    return None
+
+
+def _default_requested_risk_fraction(setup_quality: str) -> float | None:
+    bounds = _risk_bounds_for_setup_quality(setup_quality)
+    if bounds is None:
+        return None
+    lower, upper = bounds
+    if lower == upper:
+        return upper
+    return (lower + upper) / 2.0
+
+
+def _setup_quality_for_direction(packet: dict[str, object], *, direction: str) -> str:
+    regime = _regime_payload(packet)
+    if not _regime_supports_direction(regime, direction=direction):
+        return "choppy"
+
+    timeframes = _coerce_dict(packet.get("timeframes"))
+    one = _coerce_dict(timeframes.get("1m"))
+    twenty = _coerce_dict(timeframes.get("20s"))
+    if _aggressive_micro_opposition(twenty, direction=direction):
+        return "choppy"
+
+    prefix = "long" if direction == "bull" else "short"
+    trend_quality = _coerce_float(regime.get("trend_quality_score"))
+    alignment = _coerce_float(regime.get("alignment_score"))
+    chop_score = _coerce_float(regime.get("chop_score"), default=99.0)
+    entry_style = str(regime.get("entry_style", "none"))
+    has_entry_signal = (
+        _coerce_bool(one.get(f"{prefix}_trigger_ready"))
+        or _coerce_bool(one.get(f"{prefix}_continuation_ready"))
+        or _coerce_bool(one.get(f"{prefix}_pause_after_impulse_ready"))
+        or entry_style in {"impulse_breakout", "stair_step_continuation", "pause_after_impulse", "breakout"}
+        or _one_minute_price_action_supports_direction(one, direction=direction)
+    )
+    if not has_entry_signal:
+        return "weak"
+
+    if trend_quality >= 11.0 and alignment >= 3.0 and chop_score <= 1.0 and entry_style != "none":
+        return "strong"
+    if alignment >= 2.0 and chop_score <= 2.0:
+        return "normal"
+    return "weak"
+
+
+def _setup_quality_for_action(packet: dict[str, object], *, action: str) -> str:
+    if action == "enter_long":
+        return _setup_quality_for_direction(packet, direction="bull")
+    if action == "enter_short":
+        return _setup_quality_for_direction(packet, direction="bear")
+    return "choppy"
+
+
+def _normalize_requested_risk_fraction(
+    decision: MT5V51EntryDecision,
+    *,
+    packet: dict[str, object],
+) -> tuple[MT5V51EntryDecision, str]:
+    setup_quality = _setup_quality_for_action(packet, action=decision.action)
+    bounds = _risk_bounds_for_setup_quality(setup_quality)
+    if bounds is None:
+        return decision.model_copy(update={"requested_risk_fraction": None}), setup_quality
+
+    lower, upper = bounds
+    requested = (
+        decision.requested_risk_fraction
+        if decision.requested_risk_fraction is not None
+        else _default_requested_risk_fraction(setup_quality)
+    )
+    if requested is None:
+        normalized = upper
+    elif lower == upper:
+        normalized = upper
+    else:
+        normalized = max(lower, min(upper, requested))
+    return decision.model_copy(update={"requested_risk_fraction": round(normalized, 4)}), setup_quality
+
+
+def _override_risk_fraction(*, setup_quality: str) -> float:
+    default = _default_requested_risk_fraction(setup_quality)
+    if default is None:
+        return 0.001
+    return round(default, 4)
 
 
 def _continuation_override_decision(packet: dict[str, object]) -> MT5V51EntryDecision | None:
@@ -237,6 +371,7 @@ def _continuation_override_decision(packet: dict[str, object]) -> MT5V51EntryDec
     microstructure = _coerce_dict(packet.get("microstructure"))
     timeframes = _coerce_dict(packet.get("timeframes"))
     recent_bars = _coerce_dict(packet.get("recent_bars"))
+    regime = _regime_payload(packet)
     one = _coerce_dict(timeframes.get("1m"))
     twenty = _coerce_dict(timeframes.get("20s"))
     recent_1m = recent_bars.get("1m")
@@ -249,8 +384,18 @@ def _continuation_override_decision(packet: dict[str, object]) -> MT5V51EntryDec
     long_run = _consecutive_candle_run(recent_1m, direction="bull")
     short_run = _consecutive_candle_run(recent_1m, direction="bear")
 
-    if not _aggressive_micro_opposition(twenty, direction="bull"):
+    if _regime_supports_direction(regime, direction="bull") and not _aggressive_micro_opposition(twenty, direction="bull"):
         long_score = 0
+        if _coerce_float(regime.get("trend_quality_score")) >= 11.0:
+            long_score += 2
+        elif _coerce_float(regime.get("trend_quality_score")) >= 8.0:
+            long_score += 1
+        if _coerce_float(regime.get("alignment_score")) >= 3.0:
+            long_score += 1
+        if str(regime.get("entry_style", "none")) in {"impulse_breakout", "stair_step_continuation", "pause_after_impulse"}:
+            long_score += 1
+        if _coerce_float(regime.get("chop_score")) <= 1.0:
+            long_score += 1
         if long_run >= 3:
             long_score += 2
         if long_run >= 4:
@@ -271,21 +416,34 @@ def _continuation_override_decision(packet: dict[str, object]) -> MT5V51EntryDec
             long_score += 1
         if _coerce_float(one.get("latest_range_vs_atr")) >= 0.20:
             long_score += 1
-        if long_score >= 7:
+        if long_score >= 9:
+            setup_quality = _setup_quality_for_direction(packet, direction="bull")
+            if setup_quality not in {"strong", "normal"}:
+                return None
             return MT5V51EntryDecision(
                 action="enter_long",
                 confidence=0.68,
                 rationale=(
-                    "Deterministic continuation override: 1m shows a clean bullish stair-step continuation "
-                    "with positive EMA separation and the 20s tape is not aggressively opposing the move."
+                    "Deterministic continuation override: the packet marks a tradeable bullish trend regime, "
+                    "1m shows clean bullish continuation, and the 20s tape is not aggressively opposing the move."
                 ),
                 thesis_tags=["momentum", "continuation", "override"],
-                requested_risk_fraction=_override_risk_fraction(str(packet.get("risk_posture", "neutral"))),
+                requested_risk_fraction=_override_risk_fraction(setup_quality=setup_quality),
                 context_signature=str(packet.get("context_signature") or "") or None,
             )
 
-    if not _aggressive_micro_opposition(twenty, direction="bear"):
+    if _regime_supports_direction(regime, direction="bear") and not _aggressive_micro_opposition(twenty, direction="bear"):
         short_score = 0
+        if _coerce_float(regime.get("trend_quality_score")) >= 11.0:
+            short_score += 2
+        elif _coerce_float(regime.get("trend_quality_score")) >= 8.0:
+            short_score += 1
+        if _coerce_float(regime.get("alignment_score")) >= 3.0:
+            short_score += 1
+        if str(regime.get("entry_style", "none")) in {"impulse_breakout", "stair_step_continuation", "pause_after_impulse"}:
+            short_score += 1
+        if _coerce_float(regime.get("chop_score")) <= 1.0:
+            short_score += 1
         if short_run >= 3:
             short_score += 2
         if short_run >= 4:
@@ -306,16 +464,19 @@ def _continuation_override_decision(packet: dict[str, object]) -> MT5V51EntryDec
             short_score += 1
         if _coerce_float(one.get("latest_range_vs_atr")) >= 0.20:
             short_score += 1
-        if short_score >= 7:
+        if short_score >= 9:
+            setup_quality = _setup_quality_for_direction(packet, direction="bear")
+            if setup_quality not in {"strong", "normal"}:
+                return None
             return MT5V51EntryDecision(
                 action="enter_short",
                 confidence=0.68,
                 rationale=(
-                    "Deterministic continuation override: 1m shows a clean bearish stair-step continuation "
-                    "with negative EMA separation and the 20s tape is not aggressively opposing the move."
+                    "Deterministic continuation override: the packet marks a tradeable bearish trend regime, "
+                    "1m shows clean downside continuation, and the 20s tape is not aggressively opposing the move."
                 ),
                 thesis_tags=["momentum", "breakdown", "override"],
-                requested_risk_fraction=_override_risk_fraction(str(packet.get("risk_posture", "neutral"))),
+                requested_risk_fraction=_override_risk_fraction(setup_quality=setup_quality),
                 context_signature=str(packet.get("context_signature") or "") or None,
             )
 
@@ -326,6 +487,123 @@ def _price_delta_bps(*, current: float, reference: float) -> float:
     if reference == 0:
         return 0.0
     return ((current - reference) / reference) * 10000.0
+
+
+def _normalized_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _five_minute_trend_conflict_reason(
+    decision: MT5V51EntryDecision,
+    *,
+    packet: dict[str, object],
+    require_alignment: bool,
+) -> str | None:
+    if not require_alignment:
+        return None
+    five = _coerce_dict(_coerce_dict(packet.get("timeframes")).get("5m"))
+    regime = _regime_payload(packet)
+    ema_gap = _coerce_float(five.get("ema_gap_bps"))
+    return_3 = _coerce_float(five.get("return_3_bps"))
+    if decision.action == "enter_long" and ema_gap < -2.0 and return_3 < -4.0:
+        if _regime_is_exceptionally_strong_against_backdrop(regime, direction="bull"):
+            return None
+        return "5m backdrop is bearish against the long entry."
+    if decision.action == "enter_short" and ema_gap > 2.0 and return_3 > 4.0:
+        if _regime_is_exceptionally_strong_against_backdrop(regime, direction="bear"):
+            return None
+        return "5m backdrop is bullish against the short entry."
+    return None
+
+
+def _execution_alignment_reason(
+    decision: MT5V51EntryDecision,
+    *,
+    packet: dict[str, object],
+    require_5m_alignment: bool,
+) -> str | None:
+    freshness = _coerce_dict(packet.get("freshness"))
+    if not _freshness_allows_execution(freshness.get("source_snapshot_age_bucket", "")):
+        return "Execution snapshot freshness no longer supports a scalp entry."
+
+    quote = _coerce_dict(packet.get("quote"))
+    microstructure = _coerce_dict(packet.get("microstructure"))
+    if not _spread_cost_allows_scalp_entry(quote=quote, microstructure=microstructure):
+        return "Execution spread cost no longer supports the entry."
+
+    if not _regime_supports_action(packet, action=decision.action):
+        return "Current regime is choppy or no longer decisively aligned with the entry."
+
+    trend_conflict_reason = _five_minute_trend_conflict_reason(
+        decision,
+        packet=packet,
+        require_alignment=require_5m_alignment,
+    )
+    if trend_conflict_reason is not None:
+        return trend_conflict_reason
+
+    timeframes = _coerce_dict(packet.get("timeframes"))
+    one = _coerce_dict(timeframes.get("1m"))
+    twenty = _coerce_dict(timeframes.get("20s"))
+
+    if decision.action == "enter_long":
+        if _aggressive_micro_opposition(twenty, direction="bull"):
+            return "20s tape is aggressively opposing the long entry."
+        if (
+            _coerce_float(one.get("ema_gap_bps")) <= 0
+            and not _one_minute_price_action_supports_direction(one, direction="bull")
+            and not _coerce_bool(one.get("long_trigger_ready"))
+            and not _coerce_bool(one.get("long_continuation_ready"))
+            and not _coerce_bool(one.get("long_pause_after_impulse_ready"))
+        ):
+            return "1m structure no longer supports the long entry."
+        return None
+
+    if _aggressive_micro_opposition(twenty, direction="bear"):
+        return "20s tape is aggressively opposing the short entry."
+    if (
+        _coerce_float(one.get("ema_gap_bps")) >= 0
+        and not _one_minute_price_action_supports_direction(one, direction="bear")
+        and not _coerce_bool(one.get("short_trigger_ready"))
+        and not _coerce_bool(one.get("short_continuation_ready"))
+        and not _coerce_bool(one.get("short_pause_after_impulse_ready"))
+    ):
+        return "1m structure no longer supports the short entry."
+    return None
+
+
+def _one_minute_price_action_supports_direction(one: dict[str, object], *, direction: str) -> bool:
+    if direction == "bull":
+        return (
+            str(one.get("direction", "")) == "bull"
+            and (
+                int(_coerce_float(one.get("consecutive_bull_closes"))) >= 3
+                or (_coerce_float(one.get("return_3_bps")) > 0 and _coerce_float(one.get("return_5_bps")) > 0)
+            )
+        )
+    return (
+        str(one.get("direction", "")) == "bear"
+        and (
+            int(_coerce_float(one.get("consecutive_bear_closes"))) >= 3
+            or (_coerce_float(one.get("return_3_bps")) < 0 and _coerce_float(one.get("return_5_bps")) < 0)
+        )
+    )
+
+
+def _analysis_signal_age_reason(
+    *,
+    source_server_time: datetime | None,
+    current_server_time: datetime,
+    max_age_seconds: int,
+) -> str | None:
+    if source_server_time is None or max_age_seconds <= 0:
+        return None
+    age_seconds = (_normalized_utc(current_server_time) - _normalized_utc(source_server_time)).total_seconds()
+    if age_seconds <= max_age_seconds:
+        return None
+    return f"Analysis signal aged out after {age_seconds:.1f}s."
 
 
 def _fast_quote_entry_decision(packet: dict[str, object]) -> MT5V51EntryDecision | None:
@@ -339,6 +617,7 @@ def _fast_quote_entry_decision(packet: dict[str, object]) -> MT5V51EntryDecision
     microstructure = _coerce_dict(packet.get("microstructure"))
     timeframes = _coerce_dict(packet.get("timeframes"))
     recent_bars = _coerce_dict(packet.get("recent_bars"))
+    regime = _regime_payload(packet)
     one = _coerce_dict(timeframes.get("1m"))
     twenty = _coerce_dict(timeframes.get("20s"))
 
@@ -368,8 +647,16 @@ def _fast_quote_entry_decision(packet: dict[str, object]) -> MT5V51EntryDecision
     if not _spread_cost_allows_scalp_entry(quote=quote, microstructure=microstructure):
         return None
 
-    if not _aggressive_micro_opposition(twenty, direction="bull"):
+    if _regime_supports_direction(regime, direction="bull") and not _aggressive_micro_opposition(twenty, direction="bull"):
         long_score = 0
+        if _coerce_float(regime.get("trend_quality_score")) >= 11.0:
+            long_score += 2
+        elif _coerce_float(regime.get("trend_quality_score")) >= 8.0:
+            long_score += 1
+        if _coerce_float(regime.get("alignment_score")) >= 3.0:
+            long_score += 1
+        if _coerce_float(regime.get("chop_score")) <= 1.0:
+            long_score += 1
         if _coerce_bool(one.get("long_trigger_ready")):
             long_score += 2
         if _coerce_bool(one.get("long_continuation_ready")):
@@ -392,21 +679,36 @@ def _fast_quote_entry_decision(packet: dict[str, object]) -> MT5V51EntryDecision
             long_score += 1
         if live_vs_1m_close_bps >= 2.0:
             long_score += 2
-        if long_score >= 8:
+        if long_score >= 9:
+            setup_quality = _setup_quality_for_direction(packet, direction="bull")
+            if setup_quality == "choppy":
+                return None
+            if setup_quality == "weak":
+                return None
+            if setup_quality == "normal" and _coerce_float(regime.get("chop_score")) > 1.0:
+                return None
             return MT5V51EntryDecision(
                 action="enter_long",
                 confidence=0.72,
                 rationale=(
-                    "Deterministic fast-entry override: live quote acceleration and the 20s tape are pressing higher "
-                    "while the 1m structure is already bullish, so the move is actionable before the next 1m close."
+                    "Deterministic fast-entry override: the packet marks a tradeable bullish trend regime and "
+                    "live quote acceleration is pressing higher before the next 1m close."
                 ),
                 thesis_tags=["momentum", "continuation", "fast_override"],
-                requested_risk_fraction=_override_risk_fraction(str(packet.get("risk_posture", "neutral"))),
+                requested_risk_fraction=_override_risk_fraction(setup_quality=setup_quality),
                 context_signature=str(packet.get("context_signature") or "") or None,
             )
 
-    if not _aggressive_micro_opposition(twenty, direction="bear"):
+    if _regime_supports_direction(regime, direction="bear") and not _aggressive_micro_opposition(twenty, direction="bear"):
         short_score = 0
+        if _coerce_float(regime.get("trend_quality_score")) >= 11.0:
+            short_score += 2
+        elif _coerce_float(regime.get("trend_quality_score")) >= 8.0:
+            short_score += 1
+        if _coerce_float(regime.get("alignment_score")) >= 3.0:
+            short_score += 1
+        if _coerce_float(regime.get("chop_score")) <= 1.0:
+            short_score += 1
         if _coerce_bool(one.get("short_trigger_ready")):
             short_score += 2
         if _coerce_bool(one.get("short_continuation_ready")):
@@ -429,16 +731,23 @@ def _fast_quote_entry_decision(packet: dict[str, object]) -> MT5V51EntryDecision
             short_score += 1
         if live_vs_1m_close_bps <= -2.0:
             short_score += 2
-        if short_score >= 8:
+        if short_score >= 9:
+            setup_quality = _setup_quality_for_direction(packet, direction="bear")
+            if setup_quality == "choppy":
+                return None
+            if setup_quality == "weak":
+                return None
+            if setup_quality == "normal" and _coerce_float(regime.get("chop_score")) > 1.0:
+                return None
             return MT5V51EntryDecision(
                 action="enter_short",
                 confidence=0.72,
                 rationale=(
-                    "Deterministic fast-entry override: live quote acceleration and the 20s tape are pressing lower "
-                    "while the 1m structure is already bearish, so the move is actionable before the next 1m close."
+                    "Deterministic fast-entry override: the packet marks a tradeable bearish trend regime and "
+                    "live quote acceleration is pressing lower before the next 1m close."
                 ),
                 thesis_tags=["momentum", "breakdown", "fast_override"],
-                requested_risk_fraction=_override_risk_fraction(str(packet.get("risk_posture", "neutral"))),
+                requested_risk_fraction=_override_risk_fraction(setup_quality=setup_quality),
                 context_signature=str(packet.get("context_signature") or "") or None,
             )
 
@@ -497,14 +806,42 @@ async def _execute_entry_decision(
         reflections=list(reflections),
         lessons=list(lessons),
     )
-    risk_decision = risk_arbiter.evaluate_immediate_entry(
-        decision=decision,
-        snapshot=snapshot,
-        registry=registry,
-        risk_posture=risk_posture,
-        risk_multiplier=multiplier,
-        pending_symbol_command=pending_symbol_command,
-    )
+    decision, setup_quality = _normalize_requested_risk_fraction(decision, packet=execution_packet)
+    execution_packet = {
+        **execution_packet,
+        "setup_quality": setup_quality,
+        "normalized_requested_risk_fraction": decision.requested_risk_fraction,
+    }
+
+    gate_reason = None
+    if source_kind == "analysis":
+        gate_reason = _analysis_signal_age_reason(
+            source_server_time=source_server_time,
+            current_server_time=snapshot.server_time,
+            max_age_seconds=settings.v51_analysis_signal_max_age_seconds,
+        )
+    if gate_reason is None:
+        gate_reason = _execution_alignment_reason(
+            decision,
+            packet=execution_packet,
+            require_5m_alignment=settings.v51_require_5m_trend_alignment,
+        )
+
+    if gate_reason is None:
+        risk_decision = risk_arbiter.evaluate_immediate_entry(
+            decision=decision,
+            snapshot=snapshot,
+            registry=registry,
+            risk_posture=risk_posture,
+            risk_multiplier=multiplier,
+            pending_symbol_command=pending_symbol_command,
+        )
+    else:
+        risk_decision = MT5V51RiskDecision(
+            approved=False,
+            reason=gate_reason,
+            risk_posture=risk_posture,
+        )
 
     execution_record = {
         "record_type": "mt5_v51_entry_execution",
@@ -514,6 +851,7 @@ async def _execute_entry_decision(
         "source_kind": source_kind,
         "risk_decision": risk_decision.model_dump(mode="json"),
         "execution_context": execution_packet,
+        "setup_quality": setup_quality,
     }
     if source_bar_end is not None:
         execution_record["source_bar_end"] = source_bar_end.isoformat()
@@ -531,6 +869,8 @@ async def _execute_entry_decision(
             "source_kind": source_kind,
             "execution_server_time": snapshot.server_time.isoformat(),
             "execution_context_signature": execution_packet.get("context_signature"),
+            "setup_quality": setup_quality,
+            "normalized_requested_risk_fraction": decision.requested_risk_fraction,
         }
         if llm_decision is not None:
             decision_payload["llm_decision"] = llm_decision.model_dump(mode="json")
@@ -614,6 +954,8 @@ async def _execute_entry_decision(
         "execution_risk_posture": risk_posture,
         "execution_server_time": snapshot.server_time.isoformat(),
         "execution_context_signature": execution_packet.get("context_signature"),
+        "setup_quality": setup_quality,
+        "normalized_requested_risk_fraction": decision.requested_risk_fraction,
     }
     plan_payload = {
         **plan.model_dump(mode="json"),
@@ -628,6 +970,8 @@ async def _execute_entry_decision(
         "source_kind": source_kind,
         "execution_server_time": snapshot.server_time.isoformat(),
         "execution_context_signature": execution_packet.get("context_signature"),
+        "setup_quality": setup_quality,
+        "normalized_requested_risk_fraction": decision.requested_risk_fraction,
     }
     if source_bar_end is not None:
         iso_bar_end = source_bar_end.isoformat()
@@ -713,6 +1057,8 @@ async def _run_fast_entry_cycle(
     logger,
     last_signal_key: str | None,
 ) -> tuple[bool, str | None]:
+    if not settings.v51_enable_fast_entry_override:
+        return False, last_signal_key
     if risk_arbiter.snapshot_is_stale(snapshot):
         return False, last_signal_key
 
@@ -885,6 +1231,8 @@ async def run() -> None:
     shadow_mode = settings.v51_mt5_shadow_mode or not commands_enabled
     if args.enable_trade_commands:
         shadow_mode = False
+    if args.shadow_mode:
+        shadow_mode = True
     end_at = None
     if args.duration_minutes > 0:
         end_at = datetime.now(timezone.utc) + timedelta(minutes=args.duration_minutes)
@@ -1188,6 +1536,20 @@ def _launch_entry_analysis(
         reflections=list(reflections),
         lessons=list(lessons),
     )
+    analysis_budget_seconds = _entry_analysis_budget_seconds(
+        timeout_seconds=settings.v51_mt5_entry_timeout_seconds,
+        max_signal_age_seconds=settings.v51_analysis_signal_max_age_seconds,
+        execution_grace_seconds=settings.v51_stale_after_seconds,
+    )
+    if analysis_budget_seconds < float(settings.v51_mt5_entry_timeout_seconds):
+        logger.info(
+            "v5_1_entry_analysis_budget_capped symbol=%s bar_end=%s timeout_seconds=%s analysis_budget_seconds=%.1f",
+            snapshot.symbol,
+            source_bar_end.isoformat(),
+            settings.v51_mt5_entry_timeout_seconds,
+            analysis_budget_seconds,
+        )
+
     analysis_tasks[source_bar_end] = asyncio.create_task(
         _analyze_entry_signal(
             symbol=snapshot.symbol,
@@ -1195,7 +1557,7 @@ def _launch_entry_analysis(
             source_server_time=snapshot.server_time,
             analysis_packet=packet,
             source_risk_posture=risk_posture,
-            timeout_seconds=_entry_analysis_budget_seconds(timeout_seconds=settings.v51_mt5_entry_timeout_seconds),
+            timeout_seconds=analysis_budget_seconds,
             entry_agent=entry_agent,
         )
     )
@@ -1313,7 +1675,7 @@ async def _harvest_completed_entry_analyses(
 
         effective_decision = signal.result.decision
         decision_source = "llm"
-        if effective_decision.action == "hold":
+        if settings.v51_enable_continuation_override and effective_decision.action == "hold":
             override_decision = _continuation_override_decision(signal.analysis_packet)
             if override_decision is not None:
                 effective_decision = override_decision
@@ -1388,7 +1750,7 @@ async def _run_entry_protection_cycle(
 
     for ticket in tickets:
         reason = (
-            "Attach breakeven stop and TP1 after the scalp partial fill."
+            "Restore broker-safe protection on a reduced ticket."
             if ticket.partial_stage >= 1
             else "Attach the initial broker-safe stop after entry fill."
         )
@@ -1466,47 +1828,30 @@ async def _run_auto_scalp_cycle(
         lessons=lessons,
     )
     for ticket in tickets:
-        if _held_closed_1m_bars(ticket=ticket, snapshot=snapshot) < min_hold_bars:
+        if not registry.scalp_target_ready(ticket):
+            continue
+        if min_hold_bars > 0 and _held_closed_1m_bars(ticket=ticket, snapshot=snapshot) < max(min_hold_bars - 1, 0):
             continue
         trigger = None
         rationale = None
         commands: list[MT5V51BridgeCommand] = []
-        if registry.scalp_partial_ready(ticket):
-            trigger = "tp0.5_partial"
-            rationale = "Automatic scalp harvest at 0.5R with the remainder protected at breakeven and TP1."
-            fraction = registry.partial_close_fraction(ticket)
-            partial_volume = planner.partial_close_volume(
-                original_volume_lots=ticket.original_volume_lots,
-                close_fraction=fraction,
-                snapshot=snapshot,
-            )
-            remainder = ticket.current_volume_lots - partial_volume
-            if partial_volume <= 0 or remainder < snapshot.symbol_spec.volume_min:
-                continue
+        if registry.scalp_target_ready(ticket):
+            trigger = "tp0.5_full"
+            rationale = "Automatic scalp exit at 0.5R. V5.1 fully exits at the first target and does not keep a runner."
             commands.append(
                 MT5V51BridgeCommand(
-                    command_id=f"partial-{ticket.ticket_id}-{int(snapshot.server_time.timestamp())}",
+                    command_id=f"close-{ticket.ticket_id}-{int(snapshot.server_time.timestamp())}",
                     command_type="close_ticket",
                     symbol=ticket.symbol,
                     created_at=snapshot.server_time,
                     expires_at=snapshot.server_time + timedelta(seconds=60),
                     ticket_id=ticket.ticket_id,
                     basket_id=ticket.basket_id,
-                    volume_lots=min(partial_volume, ticket.current_volume_lots),
+                    volume_lots=ticket.current_volume_lots,
                     reason=rationale,
-                    metadata={"action": "auto_scalp_partial", "fraction": float(fraction)},
+                    metadata={"action": "auto_scalp_full_exit", "target_r": 0.5},
                 )
             )
-            protection_command = planner.build_protection_command(
-                ticket=ticket.model_copy(update={"partial_stage": 1}),
-                snapshot=snapshot,
-                reason=rationale,
-                created_at=snapshot.server_time,
-                expires_at=snapshot.server_time + timedelta(seconds=60),
-            )
-            if protection_command is None:
-                continue
-            commands.append(protection_command)
         if not commands or rationale is None or trigger is None:
             continue
 

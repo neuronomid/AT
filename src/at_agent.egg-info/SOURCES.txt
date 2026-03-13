@@ -108,3 +108,4 @@ src/runtime/mt5_context_packet.py
 src/runtime/mt5_v51_context_packet.py
 src/runtime/mt5_v51_microbars.py
 src/runtime/mt5_v51_quote_tape.py
+src/runtime/mt5_v51_symbols.py

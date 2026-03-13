@@ -41,7 +41,7 @@ class MT5V51RiskArbiter:
         min_confidence: float = 0.50,
         max_spread_bps: float = 12.0,
         stale_after_seconds: int = 5,
-        min_risk_fraction: float = 0.002,
+        min_risk_fraction: float = 0.001,
         max_risk_fraction: float = 0.005,
         daily_loss_pct: float = 0.015,
         max_trades_per_hour: int = 15,
@@ -108,8 +108,8 @@ class MT5V51RiskArbiter:
                 reason="The rolling 60-minute entry cap has been reached.",
                 risk_posture=risk_posture,
             )
-        adjusted_min = self._min_risk_fraction * risk_multiplier
-        adjusted_max = self._max_risk_fraction * risk_multiplier
+        adjusted_min = self._min_risk_fraction
+        adjusted_max = min(self._max_risk_fraction, max(self._min_risk_fraction, self._max_risk_fraction * risk_multiplier))
         requested = decision.requested_risk_fraction if decision.requested_risk_fraction is not None else (adjusted_min + adjusted_max) / 2.0
         risk_fraction = max(adjusted_min, min(adjusted_max, requested))
         return MT5V51RiskDecision(
@@ -165,8 +165,8 @@ class MT5V51RiskArbiter:
                 reason="The rolling 60-minute entry cap has been reached.",
                 risk_posture=risk_posture,
             )
-        adjusted_min = self._min_risk_fraction * risk_multiplier
-        adjusted_max = self._max_risk_fraction * risk_multiplier
+        adjusted_min = self._min_risk_fraction
+        adjusted_max = min(self._max_risk_fraction, max(self._min_risk_fraction, self._max_risk_fraction * risk_multiplier))
         requested = (
             decision.requested_risk_fraction
             if decision.requested_risk_fraction is not None

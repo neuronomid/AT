@@ -213,3 +213,46 @@ def test_mt5_v51_risk_posture_engine_detects_reduced_state() -> None:
 
     assert posture == "reduced"
     assert multiplier == 0.75
+
+
+def test_mt5_v51_risk_policy_clamps_requested_risk_to_absolute_bounds() -> None:
+    arbiter = MT5V51RiskArbiter(symbol="BTCUSD", min_risk_fraction=0.001, max_risk_fraction=0.005)
+    registry = MT5V51TicketRegistry()
+    snapshot = _snapshot(datetime.now(timezone.utc))
+
+    low_decision = MT5V51EntryDecision(
+        action="enter_long",
+        confidence=0.7,
+        rationale="trend",
+        thesis_tags=["trend"],
+        requested_risk_fraction=0.0005,
+    )
+    high_decision = MT5V51EntryDecision(
+        action="enter_long",
+        confidence=0.7,
+        rationale="trend",
+        thesis_tags=["trend"],
+        requested_risk_fraction=0.006,
+    )
+
+    low_risk = arbiter.evaluate_entry(
+        decision=low_decision,
+        snapshot=snapshot,
+        registry=registry,
+        risk_posture="reduced",
+        risk_multiplier=0.75,
+        pending_symbol_command=False,
+    )
+    high_risk = arbiter.evaluate_entry(
+        decision=high_decision,
+        snapshot=snapshot,
+        registry=registry,
+        risk_posture="mildly_aggressive",
+        risk_multiplier=1.10,
+        pending_symbol_command=False,
+    )
+
+    assert low_risk.approved is True
+    assert high_risk.approved is True
+    assert low_risk.risk_fraction == 0.001
+    assert high_risk.risk_fraction == 0.005

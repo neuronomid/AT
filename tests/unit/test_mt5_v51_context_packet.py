@@ -234,8 +234,8 @@ def test_mt5_v51_context_packet_uses_scalper_timeframes_only() -> None:
     assert packet["freshness"]["source_snapshot_age_bucket"] == "fresh"
     assert packet["microstructure"]["spread_percentile_1m"] is not None
     assert packet["microstructure"]["bid_drift_bps_10s"] > 0
-    assert len(packet["recent_bars"]["20s"]) == 12
-    assert len(packet["recent_bars"]["1m"]) == 8
+    assert len(packet["recent_bars"]["20s"]) == 15
+    assert len(packet["recent_bars"]["1m"]) == 12
     assert len(packet["feedback"]["recent_outcomes"]) == 4
     assert packet["feedback"]["avoid_tags"] == ["respect_invalidation"]
     assert packet["feedback"]["reinforce_tags"] == ["micro_confirm"]
@@ -250,6 +250,9 @@ def test_mt5_v51_context_packet_uses_scalper_timeframes_only() -> None:
     assert packet["timeframes"]["1m"]["long_trigger_ready"] is True
     assert packet["timeframes"]["1m"]["strong_bull_bars_last_3"] >= 2
     assert packet["timeframes"]["1m"]["consecutive_strong_bull_bars"] >= 2
+    assert packet["trend_regime"]["tradeable"] is True
+    assert packet["trend_regime"]["primary_direction"] == "bull"
+    assert packet["trend_regime"]["market_state"] == "strong_bull"
 
 
 def test_mt5_v51_context_packet_flags_stair_step_continuation_without_big_impulse() -> None:
@@ -274,6 +277,8 @@ def test_mt5_v51_context_packet_flags_stair_step_continuation_without_big_impuls
     assert one_minute["long_continuation_score"] >= 7
     assert one_minute["strong_bull_bars_last_3"] == 0
     assert one_minute["long_trigger_ready"] is True
+    assert packet["trend_regime"]["tradeable"] is True
+    assert packet["trend_regime"]["entry_style"] == "stair_step_continuation"
 
 
 def test_mt5_v51_context_packet_keeps_short_continuation_alive_through_tiny_pause() -> None:
@@ -298,3 +303,6 @@ def test_mt5_v51_context_packet_keeps_short_continuation_alive_through_tiny_paus
     assert one_minute["short_pause_after_impulse_ready"] is True
     assert one_minute["short_continuation_ready"] is True
     assert one_minute["short_trigger_ready"] is True
+    assert packet["trend_regime"]["tradeable"] is True
+    assert packet["trend_regime"]["primary_direction"] == "bear"
+    assert packet["trend_regime"]["entry_style"] == "pause_after_impulse"

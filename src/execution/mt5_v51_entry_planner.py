@@ -19,12 +19,18 @@ class MT5V51EntryPlanner:
         self,
         *,
         partial_target_r: Decimal = Decimal("0.5"),
-        final_target_r: Decimal = Decimal("1.0"),
+        final_target_r: Decimal = Decimal("0.5"),
         broker_stop_buffer_ticks: Decimal = Decimal("10"),
+        min_stop_atr_multiple: Decimal = Decimal("0.55"),
+        max_stop_atr_multiple: Decimal = Decimal("1.15"),
+        structure_lookback_bars: int = 6,
     ) -> None:
         self._partial_target_r = partial_target_r
         self._final_target_r = final_target_r
         self._broker_stop_buffer_ticks = broker_stop_buffer_ticks
+        self._min_stop_atr_multiple = min_stop_atr_multiple
+        self._max_stop_atr_multiple = max_stop_atr_multiple
+        self._structure_lookback_bars = structure_lookback_bars
 
     def plan_entry(
         self,
@@ -39,61 +45,56 @@ class MT5V51EntryPlanner:
 
         side = "long" if decision.action == "enter_long" else "short"
         entry_price = snapshot.ask if side == "long" else snapshot.bid
-        bars = self._closed_bars(snapshot)
+        bars = list(snapshot.bars_1m)
         if len(bars) < 20:
             return None
         atr = self._atr_price(bars[-14:])
         if atr <= 0:
             return None
-        previous_candle_shadow = self._previous_candle_shadow_size(bars[-1], side=side)
-
-        lows = [bar.low_price for bar in bars[-20:]]
-        highs = [bar.high_price for bar in bars[-20:]]
-        atr_offset = atr * Decimal("0.25")
+        shadow_stop_reference = self._shadow_stop_reference(bars=bars, side=side, snapshot=snapshot)
+        structure_window = bars[-self._structure_lookback_bars :]
+        lows = [bar.low_price for bar in structure_window]
+        highs = [bar.high_price for bar in structure_window]
+        atr_offset = atr * Decimal("0.10")
         if side == "long":
             structure_stop = min(lows) - atr_offset
-            vol_stop = entry_price - atr
+            vol_stop = entry_price - (atr * Decimal("0.70"))
             raw_stop = max(structure_stop, vol_stop)
             raw_r_distance = entry_price - raw_stop
+            shadow_r_distance = max(Decimal("0"), entry_price - shadow_stop_reference)
         else:
             structure_stop = max(highs) + atr_offset
-            vol_stop = entry_price + atr
+            vol_stop = entry_price + (atr * Decimal("0.70"))
             raw_stop = min(structure_stop, vol_stop)
             raw_r_distance = raw_stop - entry_price
+            shadow_r_distance = max(Decimal("0"), shadow_stop_reference - entry_price)
 
         min_r_distance = max(
-            atr * Decimal("0.80"),
-            previous_candle_shadow,
+            atr * self._min_stop_atr_multiple,
+            shadow_r_distance,
             self._minimum_broker_protection_distance(snapshot),
             snapshot.symbol_spec.tick_size,
         )
-        max_r_distance = max(atr * Decimal("2.20"), min_r_distance)
+        max_r_distance = max(atr * self._max_stop_atr_multiple, min_r_distance)
         r_distance = min(max(raw_r_distance, min_r_distance), max_r_distance)
         if r_distance <= 0:
             return None
 
         if side == "long":
             stop_loss = self._round_down_to_tick(entry_price - r_distance, snapshot.symbol_spec.tick_size)
-            soft_take_profit_1 = self._round_up_to_tick(
+            scalp_take_profit = self._round_up_to_tick(
                 entry_price + (r_distance * self._partial_target_r),
                 snapshot.symbol_spec.tick_size,
             )
-            soft_take_profit_2 = self._round_up_to_tick(
-                entry_price + (r_distance * self._final_target_r),
-                snapshot.symbol_spec.tick_size,
-            )
-            take_profit = soft_take_profit_2
         else:
             stop_loss = self._round_up_to_tick(entry_price + r_distance, snapshot.symbol_spec.tick_size)
-            soft_take_profit_1 = self._round_down_to_tick(
+            scalp_take_profit = self._round_down_to_tick(
                 entry_price - (r_distance * self._partial_target_r),
                 snapshot.symbol_spec.tick_size,
             )
-            soft_take_profit_2 = self._round_down_to_tick(
-                entry_price - (r_distance * self._final_target_r),
-                snapshot.symbol_spec.tick_size,
-            )
-            take_profit = soft_take_profit_2
+        soft_take_profit_1 = scalp_take_profit
+        soft_take_profit_2 = scalp_take_profit
+        take_profit = scalp_take_profit
         r_distance = abs(entry_price - stop_loss)
 
         risk_amount_usd = snapshot.account.equity * Decimal(str(risk_decision.risk_fraction))
@@ -272,9 +273,6 @@ class MT5V51EntryPlanner:
         safety_buffer = snapshot.symbol_spec.tick_size * self._broker_stop_buffer_ticks
         return snapshot.symbol_spec.min_stop_distance_price + spread_price + max(spread_price, safety_buffer)
 
-    def _closed_bars(self, snapshot: MT5V51BridgeSnapshot) -> list:
-        return [bar for bar in snapshot.bars_1m if bar.complete]
-
     def _atr_price(self, bars) -> Decimal:
         if len(bars) < 2:
             return Decimal("0")
@@ -292,12 +290,23 @@ class MT5V51EntryPlanner:
             return Decimal("0")
         return sum(true_ranges) / Decimal(len(true_ranges))
 
-    def _previous_candle_shadow_size(self, bar, *, side: str) -> Decimal:
+    def _shadow_stop_reference(self, *, bars, side: str, snapshot: MT5V51BridgeSnapshot) -> Decimal:
+        previous_shadow_size, previous_shadow_level = self._shadow_profile(bars[-2], side=side)
+        current_shadow_size, current_shadow_level = self._shadow_profile(bars[-1], side=side)
+        shadow_level = current_shadow_level if current_shadow_size > previous_shadow_size else previous_shadow_level
+        if side == "short" and shadow_level <= snapshot.ask:
+            shadow_level = snapshot.ask + self._stop_rejection_buffer(snapshot)
+        return shadow_level
+
+    def _shadow_profile(self, bar, *, side: str) -> tuple[Decimal, Decimal]:
         if side == "long":
             body_floor = min(bar.open_price, bar.close_price)
-            return max(Decimal("0"), body_floor - bar.low_price)
+            return max(Decimal("0"), body_floor - bar.low_price), bar.low_price
         body_ceiling = max(bar.open_price, bar.close_price)
-        return max(Decimal("0"), bar.high_price - body_ceiling)
+        return max(Decimal("0"), bar.high_price - body_ceiling), bar.high_price
+
+    def _stop_rejection_buffer(self, snapshot: MT5V51BridgeSnapshot) -> Decimal:
+        return snapshot.symbol_spec.point * Decimal("5")
 
     def _round_down_volume(self, value: Decimal, snapshot: MT5V51BridgeSnapshot) -> Decimal:
         if value <= 0:

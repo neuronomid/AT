@@ -21,18 +21,22 @@ class V51Settings(BaseSettings):
     v51_mt5_manager_sweep_seconds: int = Field(default=15, ge=5, le=60)
     v51_mt5_enable_trade_commands: bool = False
     v51_mt5_shadow_mode: bool = True
+    v51_enable_fast_entry_override: bool = True
+    v51_enable_continuation_override: bool = True
     v51_max_trades_per_hour: int = Field(default=15, ge=1)
     v51_max_spread_bps: float = Field(default=12.0, ge=0)
     v51_stale_after_seconds: int = Field(default=5, ge=1, le=30)
+    v51_analysis_signal_max_age_seconds: int = Field(default=30, ge=5, le=120)
+    v51_require_5m_trend_alignment: bool = False
     v51_min_decision_confidence: float = Field(default=0.50, ge=0, le=1)
-    v51_min_risk_fraction: float = Field(default=0.002, gt=0, le=1)
+    v51_min_risk_fraction: float = Field(default=0.001, gt=0, le=1)
     v51_max_risk_fraction: float = Field(default=0.005, gt=0, le=1)
     v51_max_daily_loss_pct: float = Field(default=0.015, gt=0, le=1)
     v51_micro_lookback_bars: int = Field(default=90, ge=30)
     v51_micro_min_warmup_bars: int = Field(default=6, ge=6)
-    v51_min_hold_bars: int = Field(default=2, ge=1, le=6)
+    v51_min_hold_bars: int = Field(default=1, ge=1, le=6)
     v51_partial_target_r: float = Field(default=0.5, gt=0, le=2)
-    v51_final_target_r: float = Field(default=1.0, gt=0, le=3)
+    v51_final_target_r: float = Field(default=0.5, gt=0, le=3)
     v51_post_partial_stop_lock_r: float = Field(default=0.0, ge=0, le=1)
 
     v51_openrouter_api_key: SecretStr | None = None

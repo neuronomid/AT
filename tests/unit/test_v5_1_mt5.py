@@ -5,10 +5,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.v5_1_mt5 import (
+    _analysis_signal_age_reason,
     _continuation_override_decision,
+    _execution_alignment_reason,
     _entry_analysis_budget_seconds,
     _entry_command_expires_at,
     _fast_quote_entry_decision,
+    _normalize_requested_risk_fraction,
     _run_entry_protection_cycle,
     _run_fast_entry_cycle,
     _run_auto_scalp_cycle,
@@ -19,6 +22,7 @@ from data.mt5_v51_schemas import (
     MT5V51AccountSnapshot,
     MT5V51Bar,
     MT5V51BridgeHealth,
+    MT5V51EntryDecision,
     MT5V51ExecutionAck,
     MT5V51LiveTicket,
     MT5V51BridgeSnapshot,
@@ -173,6 +177,17 @@ def test_v5_1_entry_analysis_budget_uses_full_timeout_window() -> None:
     assert _entry_analysis_budget_seconds(timeout_seconds=60) == 60.0
 
 
+def test_v5_1_entry_analysis_budget_caps_to_fresh_execution_window() -> None:
+    assert (
+        _entry_analysis_budget_seconds(
+            timeout_seconds=60,
+            max_signal_age_seconds=30,
+            execution_grace_seconds=5,
+        )
+        == 25.0
+    )
+
+
 def test_v5_1_entry_command_expiry_uses_freshness_window() -> None:
     last_bar_end = datetime(2026, 3, 12, 12, 0, tzinfo=timezone.utc)
     snapshot = _snapshot(server_time=last_bar_end + timedelta(minutes=1), last_bar_end=last_bar_end)
@@ -188,6 +203,15 @@ def test_v5_1_continuation_override_promotes_clean_bull_run() -> None:
         "microstructure": {"spread_to_1m_atr_ratio": 0.22},
         "risk_posture": "neutral",
         "context_signature": "bull|bull|bear|tight",
+        "trend_regime": {
+            "primary_direction": "bull",
+            "market_state": "strong_bull",
+            "tradeable": True,
+            "entry_style": "stair_step_continuation",
+            "trend_quality_score": 11,
+            "alignment_score": 3,
+            "chop_score": 1,
+        },
         "timeframes": {
             "1m": {
                 "long_trigger_ready": False,
@@ -220,7 +244,7 @@ def test_v5_1_continuation_override_promotes_clean_bull_run() -> None:
 
     assert decision is not None
     assert decision.action == "enter_long"
-    assert decision.requested_risk_fraction == 0.0035
+    assert decision.requested_risk_fraction == 0.005
     assert "override" in decision.thesis_tags
 
 
@@ -232,6 +256,15 @@ def test_v5_1_continuation_override_accepts_aging_pause_after_impulse() -> None:
         "microstructure": {"spread_to_1m_atr_ratio": 0.4821, "spread_percentile_1m": 20.75},
         "risk_posture": "neutral",
         "context_signature": "bull|bull|bull|tight",
+        "trend_regime": {
+            "primary_direction": "bull",
+            "market_state": "bullish_continuation",
+            "tradeable": True,
+            "entry_style": "pause_after_impulse",
+            "trend_quality_score": 10,
+            "alignment_score": 3,
+            "chop_score": 1,
+        },
         "timeframes": {
             "1m": {
                 "direction": "flat",
@@ -270,7 +303,7 @@ def test_v5_1_continuation_override_accepts_aging_pause_after_impulse() -> None:
 
     assert decision is not None
     assert decision.action == "enter_long"
-    assert decision.requested_risk_fraction == 0.0035
+    assert decision.requested_risk_fraction == 0.0025
     assert "override" in decision.thesis_tags
 
 
@@ -282,6 +315,15 @@ def test_v5_1_continuation_override_promotes_bear_pause_after_impulse() -> None:
         "microstructure": {"spread_to_1m_atr_ratio": 0.22},
         "risk_posture": "neutral",
         "context_signature": "bear|bear|bull|tight",
+        "trend_regime": {
+            "primary_direction": "bear",
+            "market_state": "strong_bear",
+            "tradeable": True,
+            "entry_style": "pause_after_impulse",
+            "trend_quality_score": 11,
+            "alignment_score": 3,
+            "chop_score": 1,
+        },
         "timeframes": {
             "1m": {
                 "direction": "bull",
@@ -316,7 +358,7 @@ def test_v5_1_continuation_override_promotes_bear_pause_after_impulse() -> None:
 
     assert decision is not None
     assert decision.action == "enter_short"
-    assert decision.requested_risk_fraction == 0.0035
+    assert decision.requested_risk_fraction == 0.005
     assert "override" in decision.thesis_tags
 
 
@@ -333,6 +375,15 @@ def test_v5_1_fast_quote_entry_decision_detects_live_bull_acceleration() -> None
         },
         "risk_posture": "neutral",
         "context_signature": "bull|bull|bull|tight",
+        "trend_regime": {
+            "primary_direction": "bull",
+            "market_state": "strong_bull",
+            "tradeable": True,
+            "entry_style": "impulse_breakout",
+            "trend_quality_score": 12,
+            "alignment_score": 4,
+            "chop_score": 1,
+        },
         "timeframes": {
             "1m": {
                 "long_trigger_ready": True,
@@ -361,6 +412,7 @@ def test_v5_1_fast_quote_entry_decision_detects_live_bull_acceleration() -> None
     assert decision is not None
     assert decision.action == "enter_long"
     assert decision.confidence == 0.72
+    assert decision.requested_risk_fraction == 0.005
     assert "fast_override" in decision.thesis_tags
 
 
@@ -378,6 +430,15 @@ def test_v5_1_fast_quote_entry_decision_accepts_aging_quotes() -> None:
         },
         "risk_posture": "neutral",
         "context_signature": "bull|flat|bull|tight",
+        "trend_regime": {
+            "primary_direction": "bull",
+            "market_state": "bullish_continuation",
+            "tradeable": True,
+            "entry_style": "stair_step_continuation",
+            "trend_quality_score": 10,
+            "alignment_score": 3,
+            "chop_score": 1,
+        },
         "timeframes": {
             "1m": {
                 "long_trigger_ready": True,
@@ -406,6 +467,7 @@ def test_v5_1_fast_quote_entry_decision_accepts_aging_quotes() -> None:
     assert decision is not None
     assert decision.action == "enter_long"
     assert decision.confidence == 0.72
+    assert decision.requested_risk_fraction == 0.0025
     assert "fast_override" in decision.thesis_tags
 
 
@@ -423,6 +485,15 @@ def test_v5_1_fast_quote_entry_decision_detects_live_bull_acceleration_without_2
         },
         "risk_posture": "neutral",
         "context_signature": "bull|flat|bull|tight",
+        "trend_regime": {
+            "primary_direction": "bull",
+            "market_state": "bullish_continuation",
+            "tradeable": True,
+            "entry_style": "stair_step_continuation",
+            "trend_quality_score": 10,
+            "alignment_score": 3,
+            "chop_score": 1,
+        },
         "timeframes": {
             "1m": {
                 "long_trigger_ready": True,
@@ -451,7 +522,104 @@ def test_v5_1_fast_quote_entry_decision_detects_live_bull_acceleration_without_2
     assert decision is not None
     assert decision.action == "enter_long"
     assert decision.confidence == 0.72
+    assert decision.requested_risk_fraction == 0.0025
     assert "fast_override" in decision.thesis_tags
+
+
+def test_v5_1_fast_quote_entry_decision_skips_weak_choppy_setup() -> None:
+    packet = {
+        "position_state": "flat",
+        "freshness": {"source_snapshot_age_bucket": "fresh"},
+        "quote": {"bid": 100.0, "ask": 100.08, "spread_bps": 4.0},
+        "microstructure": {
+            "spread_to_1m_atr_ratio": 0.20,
+            "bid_drift_bps_10s": 1.6,
+            "ask_drift_bps_10s": 1.9,
+            "mid_drift_bps_10s": 1.8,
+            "sample_count_10s": 7,
+        },
+        "risk_posture": "neutral",
+        "context_signature": "bull|flat|bull|tight",
+        "trend_regime": {
+            "primary_direction": "bull",
+            "market_state": "bullish_continuation",
+            "tradeable": True,
+            "entry_style": "breakout",
+            "trend_quality_score": 8,
+            "alignment_score": 1,
+            "chop_score": 3,
+        },
+        "timeframes": {
+            "1m": {
+                "long_trigger_ready": True,
+                "long_continuation_ready": False,
+                "long_pause_after_impulse_ready": False,
+                "ema_gap_bps": 1.1,
+                "return_3_bps": 4.4,
+                "return_5_bps": 6.2,
+                "direction": "bull",
+            },
+            "20s": {
+                "direction": "bull",
+                "long_trigger_ready": False,
+                "long_continuation_ready": False,
+                "consecutive_bear_closes": 0,
+                "consecutive_strong_bear_bars": 0,
+                "short_trigger_ready": False,
+            },
+        },
+        "recent_bars": {
+            "1m": [{"close": 99.96}],
+            "20s": [],
+        },
+    }
+
+    decision = _fast_quote_entry_decision(packet)
+
+    assert decision is None
+
+
+def test_v5_1_normalizes_requested_risk_to_setup_quality_band() -> None:
+    packet = {
+        "trend_regime": {
+            "primary_direction": "bull",
+            "market_state": "bullish_continuation",
+            "tradeable": True,
+            "entry_style": "breakout",
+            "trend_quality_score": 8,
+            "alignment_score": 1,
+            "chop_score": 3,
+        },
+        "timeframes": {
+            "1m": {
+                "direction": "bull",
+                "long_trigger_ready": True,
+                "long_continuation_ready": False,
+                "long_pause_after_impulse_ready": False,
+                "ema_gap_bps": 1.1,
+                "return_3_bps": 4.4,
+                "return_5_bps": 6.2,
+            },
+            "20s": {
+                "direction": "bull",
+                "consecutive_bear_closes": 0,
+                "consecutive_strong_bear_bars": 0,
+                "short_trigger_ready": False,
+            },
+        },
+    }
+    decision = MT5V51EntryDecision(
+        action="enter_long",
+        confidence=0.72,
+        rationale="trend",
+        thesis_tags=["momentum"],
+        requested_risk_fraction=0.004,
+    )
+
+    normalized, setup_quality = _normalize_requested_risk_fraction(decision, packet=packet)
+
+    assert setup_quality == "weak"
+    assert normalized.requested_risk_fraction == 0.002
 
 
 def test_v5_1_fast_entry_cycle_queues_intrabar_command(tmp_path) -> None:
@@ -479,6 +647,15 @@ def test_v5_1_fast_entry_cycle_queues_intrabar_command(tmp_path) -> None:
         },
         "risk_posture": "neutral",
         "context_signature": "bull|bull|bull|tight",
+        "trend_regime": {
+            "primary_direction": "bull",
+            "market_state": "strong_bull",
+            "tradeable": True,
+            "entry_style": "impulse_breakout",
+            "trend_quality_score": 12,
+            "alignment_score": 4,
+            "chop_score": 1,
+        },
         "timeframes": {
             "1m": {
                 "long_trigger_ready": True,
@@ -508,6 +685,9 @@ def test_v5_1_fast_entry_cycle_queues_intrabar_command(tmp_path) -> None:
         v51_micro_min_warmup_bars=6,
         v51_stale_after_seconds=5,
         v51_bridge_id="bridge-test",
+        v51_enable_fast_entry_override=True,
+        v51_analysis_signal_max_age_seconds=30,
+        v51_require_5m_trend_alignment=True,
     )
 
     executed, signal_key = asyncio.run(
@@ -589,6 +769,15 @@ def test_v5_1_fast_entry_cycle_queues_intrabar_command_during_microbar_warmup(tm
         },
         "risk_posture": "neutral",
         "context_signature": "bull|flat|bull|tight",
+        "trend_regime": {
+            "primary_direction": "bull",
+            "market_state": "bullish_continuation",
+            "tradeable": True,
+            "entry_style": "stair_step_continuation",
+            "trend_quality_score": 10,
+            "alignment_score": 3,
+            "chop_score": 1,
+        },
         "timeframes": {
             "1m": {
                 "long_trigger_ready": True,
@@ -618,6 +807,9 @@ def test_v5_1_fast_entry_cycle_queues_intrabar_command_during_microbar_warmup(tm
         v51_micro_min_warmup_bars=6,
         v51_stale_after_seconds=5,
         v51_bridge_id="bridge-test",
+        v51_enable_fast_entry_override=True,
+        v51_analysis_signal_max_age_seconds=30,
+        v51_require_5m_trend_alignment=True,
     )
 
     executed, signal_key = asyncio.run(
@@ -650,7 +842,7 @@ def test_v5_1_fast_entry_cycle_queues_intrabar_command_during_microbar_warmup(tm
     assert commands[0].side == "long"
 
 
-def test_v5_1_auto_scalp_cycle_queues_partial_and_breakeven(tmp_path) -> None:
+def test_v5_1_auto_scalp_cycle_queues_full_tp0_5_exit(tmp_path) -> None:
     base = datetime.now(timezone.utc).replace(microsecond=0)
     snapshot = _snapshot(
         server_time=base,
@@ -688,14 +880,381 @@ def test_v5_1_auto_scalp_cycle_queues_partial_and_breakeven(tmp_path) -> None:
 
     commands = asyncio.run(bridge_state.poll_commands(limit=10))
 
-    assert len(commands) == 2
-    assert any(command.command_type == "close_ticket" and command.volume_lots == Decimal("0.10") for command in commands)
-    assert any(
-        command.command_type == "modify_ticket"
-        and command.stop_loss == Decimal("60100")
-        and command.take_profit == Decimal("60120")
-        for command in commands
+    assert len(commands) == 1
+    assert commands[0].command_type == "close_ticket"
+    assert commands[0].volume_lots == Decimal("0.20")
+    assert commands[0].metadata["action"] == "auto_scalp_full_exit"
+
+
+def test_v5_1_fast_entry_cycle_respects_disable_flag(tmp_path) -> None:
+    base = datetime.now(timezone.utc).replace(microsecond=0)
+    snapshot = _snapshot(
+        server_time=base,
+        last_bar_end=base - timedelta(minutes=1),
+    ).model_copy(
+        update={
+            "bars_20s": _micro_bars(),
+            "bid": Decimal("60118"),
+            "ask": Decimal("60120"),
+            "spread_bps": 0.33,
+        }
     )
+    packet = {
+        "position_state": "flat",
+        "freshness": {"source_snapshot_age_bucket": "fresh"},
+        "quote": {"bid": 60118.0, "ask": 60120.0, "spread_bps": 0.33},
+        "microstructure": {
+            "spread_to_1m_atr_ratio": 0.08,
+            "bid_drift_bps_10s": 2.4,
+            "ask_drift_bps_10s": 2.7,
+            "mid_drift_bps_10s": 2.5,
+        },
+        "risk_posture": "neutral",
+        "context_signature": "bull|bull|bull|tight",
+        "trend_regime": {
+            "primary_direction": "bull",
+            "market_state": "strong_bull",
+            "tradeable": True,
+            "entry_style": "impulse_breakout",
+            "trend_quality_score": 12,
+            "alignment_score": 4,
+            "chop_score": 1,
+        },
+        "timeframes": {
+            "1m": {
+                "long_trigger_ready": True,
+                "long_continuation_ready": True,
+                "ema_gap_bps": 5.1,
+                "return_3_bps": 12.5,
+                "return_5_bps": 18.0,
+            },
+            "20s": {
+                "direction": "bull",
+                "long_trigger_ready": True,
+                "long_continuation_ready": True,
+                "consecutive_bear_closes": 0,
+                "consecutive_strong_bear_bars": 0,
+                "short_trigger_ready": False,
+            },
+        },
+        "recent_bars": {
+            "1m": [{"close": 60098.0}],
+            "20s": [{"close": 60111.0}],
+        },
+    }
+    journal = Journal(str(Path(tmp_path) / "events.jsonl"))
+
+    executed, signal_key = asyncio.run(
+        _run_fast_entry_cycle(
+            snapshot=snapshot,
+            settings=SimpleNamespace(
+                v51_micro_min_warmup_bars=6,
+                v51_stale_after_seconds=5,
+                v51_bridge_id="bridge-test",
+                v51_enable_fast_entry_override=False,
+                v51_analysis_signal_max_age_seconds=30,
+                v51_require_5m_trend_alignment=True,
+            ),
+            agent_name="mt5_v51_primary",
+            event_journal=journal,
+            store=None,
+            registry=MT5V51TicketRegistry(),
+            planner=MT5V51EntryPlanner(),
+            risk_arbiter=MT5V51RiskArbiter(),
+            context_builder=_StaticEntryContextBuilder(packet),
+            posture_engine=MT5V51RiskPostureEngine(),
+            bridge_state=MT5V51BridgeState(),
+            reflections=[],
+            lessons=[],
+            shadow_mode=False,
+            logger=None,
+            last_signal_key=None,
+        )
+    )
+
+    assert executed is False
+    assert signal_key is None
+
+
+def test_v5_1_fast_entry_cycle_shadow_mode_allows_repeat_entry(tmp_path) -> None:
+    base = datetime.now(timezone.utc).replace(microsecond=0)
+    packet = {
+        "position_state": "flat",
+        "freshness": {"source_snapshot_age_bucket": "fresh"},
+        "quote": {"bid": 60118.0, "ask": 60120.0, "spread_bps": 0.33},
+        "microstructure": {
+            "spread_to_1m_atr_ratio": 0.08,
+            "bid_drift_bps_10s": 2.4,
+            "ask_drift_bps_10s": 2.7,
+            "mid_drift_bps_10s": 2.5,
+        },
+        "risk_posture": "neutral",
+        "context_signature": "bull|bull|bull|tight",
+        "trend_regime": {
+            "primary_direction": "bull",
+            "market_state": "strong_bull",
+            "tradeable": True,
+            "entry_style": "impulse_breakout",
+            "trend_quality_score": 12,
+            "alignment_score": 4,
+            "chop_score": 1,
+        },
+        "timeframes": {
+            "1m": {
+                "long_trigger_ready": True,
+                "long_continuation_ready": True,
+                "ema_gap_bps": 5.1,
+                "return_3_bps": 12.5,
+                "return_5_bps": 18.0,
+            },
+            "20s": {
+                "direction": "bull",
+                "long_trigger_ready": True,
+                "long_continuation_ready": True,
+                "consecutive_bear_closes": 0,
+                "consecutive_strong_bear_bars": 0,
+                "short_trigger_ready": False,
+            },
+        },
+        "recent_bars": {
+            "1m": [{"close": 60098.0}],
+            "20s": [{"close": 60111.0}],
+        },
+    }
+    registry = MT5V51TicketRegistry()
+    journal_path = Path(tmp_path) / "events.jsonl"
+    journal = Journal(str(journal_path))
+    settings = SimpleNamespace(
+        v51_micro_min_warmup_bars=6,
+        v51_stale_after_seconds=5,
+        v51_bridge_id="bridge-test",
+        v51_enable_fast_entry_override=True,
+        v51_analysis_signal_max_age_seconds=30,
+        v51_require_5m_trend_alignment=False,
+    )
+
+    first_snapshot = _snapshot(
+        server_time=base,
+        last_bar_end=base - timedelta(minutes=1),
+    ).model_copy(
+        update={
+            "bars_20s": _micro_bars(),
+            "bid": Decimal("60118"),
+            "ask": Decimal("60120"),
+            "spread_bps": 0.33,
+        }
+    )
+    second_snapshot = _snapshot(
+        server_time=base + timedelta(seconds=61),
+        last_bar_end=base,
+    ).model_copy(
+        update={
+            "bars_20s": _micro_bars(),
+            "bid": Decimal("60132"),
+            "ask": Decimal("60134"),
+            "spread_bps": 0.33,
+        }
+    )
+
+    executed_first, signal_key_first = asyncio.run(
+        _run_fast_entry_cycle(
+            snapshot=first_snapshot,
+            settings=settings,
+            agent_name="mt5_v51_primary",
+            event_journal=journal,
+            store=None,
+            registry=registry,
+            planner=MT5V51EntryPlanner(),
+            risk_arbiter=MT5V51RiskArbiter(),
+            context_builder=_StaticEntryContextBuilder(packet),
+            posture_engine=MT5V51RiskPostureEngine(),
+            bridge_state=MT5V51BridgeState(),
+            reflections=[],
+            lessons=[],
+            shadow_mode=True,
+            logger=None,
+            last_signal_key=None,
+        )
+    )
+    executed_second, signal_key_second = asyncio.run(
+        _run_fast_entry_cycle(
+            snapshot=second_snapshot,
+            settings=settings,
+            agent_name="mt5_v51_primary",
+            event_journal=journal,
+            store=None,
+            registry=registry,
+            planner=MT5V51EntryPlanner(),
+            risk_arbiter=MT5V51RiskArbiter(),
+            context_builder=_StaticEntryContextBuilder(packet),
+            posture_engine=MT5V51RiskPostureEngine(),
+            bridge_state=MT5V51BridgeState(),
+            reflections=[],
+            lessons=[],
+            shadow_mode=True,
+            logger=None,
+            last_signal_key=None,
+        )
+    )
+
+    assert executed_first is True
+    assert signal_key_first is not None
+    assert executed_second is True
+    assert signal_key_second is not None
+
+    lines = [line for line in journal_path.read_text().splitlines() if line.strip()]
+    assert sum('"record_type": "mt5_v51_shadow_command"' in line for line in lines) == 2
+
+
+def test_v5_1_analysis_signal_age_reason_rejects_expired_signal() -> None:
+    reason = _analysis_signal_age_reason(
+        source_server_time=datetime(2026, 3, 13, 12, 0, tzinfo=timezone.utc),
+        current_server_time=datetime(2026, 3, 13, 12, 0, 45, tzinfo=timezone.utc),
+        max_age_seconds=30,
+    )
+
+    assert reason == "Analysis signal aged out after 45.0s."
+
+
+def test_v5_1_execution_alignment_reason_rejects_countertrend_short() -> None:
+    packet = {
+        "freshness": {"source_snapshot_age_bucket": "aging"},
+        "quote": {"spread_bps": 3.5},
+        "microstructure": {"spread_to_1m_atr_ratio": 0.22, "spread_percentile_1m": 20.0},
+        "trend_regime": {
+            "primary_direction": "bear",
+            "market_state": "strong_bear",
+            "tradeable": True,
+            "entry_style": "impulse_breakout",
+            "trend_quality_score": 8,
+            "alignment_score": 1,
+            "chop_score": 1,
+        },
+        "timeframes": {
+            "20s": {
+                "direction": "bear",
+                "short_trigger_ready": True,
+                "short_continuation_ready": False,
+                "consecutive_bull_closes": 0,
+                "consecutive_strong_bull_bars": 0,
+                "long_trigger_ready": False,
+            },
+            "1m": {
+                "ema_gap_bps": -2.5,
+                "short_trigger_ready": True,
+                "short_continuation_ready": True,
+                "short_pause_after_impulse_ready": False,
+            },
+            "5m": {
+                "ema_gap_bps": 5.1,
+                "return_3_bps": 12.4,
+            },
+        },
+    }
+
+    reason = _execution_alignment_reason(
+        MT5V51EntryDecision(action="enter_short", confidence=0.7, rationale="test", thesis_tags=[]),
+        packet=packet,
+        require_5m_alignment=True,
+    )
+
+    assert reason == "5m backdrop is bullish against the short entry."
+
+
+def test_v5_1_execution_alignment_reason_allows_mild_20s_pullback_inside_strong_bull_regime() -> None:
+    packet = {
+        "freshness": {"source_snapshot_age_bucket": "aging"},
+        "quote": {"spread_bps": 3.5},
+        "microstructure": {"spread_to_1m_atr_ratio": 0.22, "spread_percentile_1m": 20.0},
+        "trend_regime": {
+            "primary_direction": "bull",
+            "market_state": "strong_bull",
+            "tradeable": True,
+            "entry_style": "impulse_breakout",
+            "trend_quality_score": 11,
+            "alignment_score": 3,
+            "chop_score": 1,
+        },
+        "timeframes": {
+            "20s": {
+                "direction": "bear",
+                "ema_gap_bps": -4.0,
+                "long_trigger_ready": False,
+                "long_continuation_ready": False,
+                "short_trigger_ready": False,
+                "consecutive_bear_closes": 1,
+                "consecutive_strong_bear_bars": 0,
+            },
+            "1m": {
+                "ema_gap_bps": 3.5,
+                "long_trigger_ready": True,
+                "long_continuation_ready": False,
+                "long_pause_after_impulse_ready": False,
+            },
+            "5m": {
+                "ema_gap_bps": 3.0,
+                "return_3_bps": 8.0,
+            },
+        },
+    }
+
+    reason = _execution_alignment_reason(
+        MT5V51EntryDecision(action="enter_long", confidence=0.72, rationale="test", thesis_tags=[]),
+        packet=packet,
+        require_5m_alignment=False,
+    )
+
+    assert reason is None
+
+
+def test_v5_1_execution_alignment_reason_allows_bearish_price_action_with_lagging_ema_gap() -> None:
+    packet = {
+        "freshness": {"source_snapshot_age_bucket": "aging"},
+        "quote": {"spread_bps": 3.5},
+        "microstructure": {"spread_to_1m_atr_ratio": 0.19, "spread_percentile_1m": 96.0},
+        "trend_regime": {
+            "primary_direction": "bear",
+            "market_state": "bearish_continuation",
+            "tradeable": True,
+            "entry_style": "impulse_breakout",
+            "trend_quality_score": 9,
+            "alignment_score": 3,
+            "chop_score": 1,
+        },
+        "timeframes": {
+            "20s": {
+                "direction": "bear",
+                "ema_gap_bps": -0.9,
+                "short_trigger_ready": True,
+                "short_continuation_ready": False,
+                "long_trigger_ready": False,
+                "consecutive_bull_closes": 0,
+                "consecutive_strong_bull_bars": 0,
+            },
+            "1m": {
+                "direction": "bear",
+                "ema_gap_bps": 14.3,
+                "return_3_bps": -12.6,
+                "return_5_bps": -7.5,
+                "consecutive_bear_closes": 4,
+                "short_trigger_ready": False,
+                "short_continuation_ready": False,
+                "short_pause_after_impulse_ready": False,
+            },
+            "5m": {
+                "ema_gap_bps": 39.2,
+                "return_3_bps": 31.2,
+            },
+        },
+    }
+
+    reason = _execution_alignment_reason(
+        MT5V51EntryDecision(action="enter_short", confidence=0.72, rationale="test", thesis_tags=[]),
+        packet=packet,
+        require_5m_alignment=False,
+    )
+
+    assert reason is None
 
 
 def test_v5_1_auto_scalp_cycle_waits_for_minimum_hold_bars(tmp_path) -> None:

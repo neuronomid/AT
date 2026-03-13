@@ -188,16 +188,19 @@ class MT5V51TicketRegistry:
 
     def partial_close_fraction(self, ticket: MT5V51TicketRecord) -> Decimal:
         if ticket.partial_stage == 0:
-            return Decimal("0.50")
+            return Decimal("1.00")
         if ticket.partial_stage == 1:
             return Decimal("0")
         return Decimal("0")
 
+    def scalp_target_ready(self, ticket: MT5V51TicketRecord) -> bool:
+        return ticket.unrealized_r >= float(self._partial_target_r)
+
     def scalp_partial_ready(self, ticket: MT5V51TicketRecord) -> bool:
-        return ticket.partial_stage == 0 and ticket.unrealized_r >= float(self._partial_target_r)
+        return ticket.partial_stage == 0 and self.scalp_target_ready(ticket)
 
     def scalp_final_ready(self, ticket: MT5V51TicketRecord) -> bool:
-        return ticket.partial_stage >= 1 and ticket.unrealized_r >= float(self._final_target_r)
+        return ticket.partial_stage >= 1 and ticket.unrealized_r >= float(self._partial_target_r)
 
     def _hydrate_record(self, *, live: MT5V51LiveTicket, snapshot: MT5V51BridgeSnapshot) -> MT5V51TicketRecord:
         matched_pending = None
@@ -354,6 +357,11 @@ class MT5V51TicketRegistry:
         if closed_fraction >= 0.45:
             return 1
         return 0
+
+    def _normalize_datetime(self, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
     def _unrealized_r(self, *, record: MT5V51TicketRecord, current_price: Decimal) -> float:
         if record.r_distance_price <= 0:
