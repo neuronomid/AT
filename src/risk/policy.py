@@ -16,6 +16,7 @@ class RiskPolicy:
         max_spread_bps: Decimal,
         max_trades_per_hour: int,
         cooldown_seconds: int,
+        min_expected_edge_bps: float = 0.0,
         position_sizer: PositionSizer | None = None,
         guardrails: Guardrails | None = None,
     ) -> None:
@@ -25,6 +26,7 @@ class RiskPolicy:
         self._max_spread_bps = max_spread_bps
         self._max_trades_per_hour = max_trades_per_hour
         self._cooldown_seconds = cooldown_seconds
+        self._min_expected_edge_bps = min_expected_edge_bps
         self._position_sizer = position_sizer or PositionSizer()
         self._guardrails = guardrails or Guardrails()
 
@@ -42,6 +44,9 @@ class RiskPolicy:
 
         if decision.confidence < self._min_confidence:
             return RiskDecision(approved=False, reason="Decision confidence is below the configured minimum.")
+
+        if decision.expected_edge_bps is not None and decision.expected_edge_bps < self._min_expected_edge_bps:
+            return RiskDecision(approved=False, reason="Expected edge is below the configured minimum.")
 
         if account_snapshot.trading_blocked:
             return RiskDecision(approved=False, reason="Account is marked as trading blocked.")
@@ -64,10 +69,26 @@ class RiskPolicy:
             if spread_bps is not None and spread_bps > self._max_spread_bps:
                 return RiskDecision(approved=False, reason="Current spread is wider than the configured limit.")
 
-        allowed_notional = self._position_sizer.size_for_cash(
+        if decision.action == "exit":
+            return RiskDecision(
+                approved=True,
+                reason="Exit action passes deterministic risk checks.",
+                allowed_notional_usd=Decimal("0"),
+            )
+
+        stop_loss_bps = decision.trade_plan.stop_loss_bps if decision.trade_plan is not None else None
+        requested_notional_usd = (
+            decision.execution_plan.requested_notional_usd
+            if decision.execution_plan is not None
+            else None
+        )
+        allowed_notional = self._position_sizer.size_for_trade(
             cash=account_snapshot.cash,
+            equity=account_snapshot.equity,
             risk_fraction=self._max_risk_fraction,
             notional_cap=self._max_position_notional_usd,
+            stop_loss_bps=stop_loss_bps,
+            requested_notional_usd=requested_notional_usd,
         )
         if allowed_notional <= 0:
             return RiskDecision(approved=False, reason="No buying power available for a new trade.")

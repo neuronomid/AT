@@ -51,3 +51,37 @@ async def test_account_service_builds_snapshot_from_raw_payloads() -> None:
 def test_account_service_converts_missing_values_to_zero() -> None:
     service = AlpacaAccountService(StubClient())
     assert service._to_decimal(None) == Decimal("0")
+
+
+class FakeDustPositionAccountService(AlpacaAccountService):
+    async def fetch_account(self) -> dict[str, object]:
+        return {
+            "equity": "10000",
+            "cash": "10000",
+            "buying_power": "20000",
+            "trading_blocked": False,
+            "status": "ACTIVE",
+            "crypto_status": "ACTIVE",
+        }
+
+    async def fetch_positions(self) -> list[dict[str, object]]:
+        return [
+            {
+                "symbol": "ETHUSD",
+                "qty": "0.0000001",
+                "avg_entry_price": "2027.25",
+                "market_value": "0.000538",
+                "unrealized_pl": "-0.000001",
+            }
+        ]
+
+
+@pytest.mark.anyio
+async def test_account_service_zeroes_dust_position_fields() -> None:
+    service = FakeDustPositionAccountService(StubClient())
+    snapshot = await service.fetch_account_snapshot("ETH/USD")
+
+    assert snapshot.open_position_qty == Decimal("0")
+    assert snapshot.avg_entry_price == Decimal("0")
+    assert snapshot.market_value == Decimal("0")
+    assert snapshot.unrealized_pl == Decimal("0")

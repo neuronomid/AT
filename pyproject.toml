@@ -9,10 +9,18 @@ description = "Research-phase Alpaca ETH/USD paper trading agent"
 readme = "docs/alpaca-eth-agent-plan.md"
 requires-python = ">=3.11"
 dependencies = [
+  "fastapi>=0.116.0",
   "httpx>=0.27.0",
+  "hmmlearn>=0.3.3",
+  "numpy>=2.1.0",
+  "pandas>=2.2.0",
+  "plotly>=5.24.0",
   "psycopg[binary]>=3.2.0",
   "pydantic>=2.7.0",
   "pydantic-settings>=2.2.1",
+  "scikit-learn>=1.6.0",
+  "streamlit>=1.42.0",
+  "uvicorn>=0.35.0",
   "websockets>=12.0",
 ]
 
@@ -24,8 +32,18 @@ dev = [
 [project.scripts]
 at-agent = "app.main:main"
 at-agent-backtest = "app.backtest:main"
+at-agent-dashboard = "dashboard.app:main"
+at-agent-dashboard-api = "dashboard_api.app:main"
 at-agent-review = "app.review:main"
+at-agent-strategy-review = "app.strategy_review:main"
 at-agent-evaluate = "app.evaluate:main"
+at-agent-strategy-cycle = "app.strategy_cycle:main"
+at-agent-v3-research = "app.v3_research:main"
+at-agent-v3-2-research = "app.v3_2_research:main"
+at-agent-discovery-cycle = "app.discovery_cycle:main"
+at-agent-v4-live = "app.v4_live:main"
+at-agent-v5-mt5 = "app.v5_mt5:main"
+at-agent-v5-1-mt5 = "app.v5_1_mt5:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

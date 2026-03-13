@@ -9,6 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_env: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
+    agent_name: str = "primary"
 
     alpaca_api_key: SecretStr | None = None
     alpaca_api_secret: SecretStr | None = None
@@ -34,6 +35,7 @@ class Settings(BaseSettings):
     lessons_path: str = "var/lessons.jsonl"
     review_summary_path: str = "var/review_summary.json"
     evaluation_report_path: str = "var/evaluation_report.json"
+    strategy_advice_path: str = "var/strategy_advice.md"
     evaluation_min_closed_trades: int = Field(default=1, ge=0)
     evaluation_min_score_improvement: float = 5.0
     evaluation_max_additional_drawdown_bps: float = Field(default=50.0, ge=0)
@@ -46,6 +48,20 @@ class Settings(BaseSettings):
     backtest_step_days: int = Field(default=30, ge=1)
     backtest_warmup_bars: int = Field(default=20, ge=1)
     backtest_starting_cash_usd: Decimal = Decimal("10000")
+    dashboard_host: str = "127.0.0.1"
+    dashboard_port: int = Field(default=8501, ge=1, le=65535)
+    dashboard_api_host: str = "127.0.0.1"
+    dashboard_api_port: int = Field(default=8000, ge=1, le=65535)
+
+    mt5_bridge_host: str = "127.0.0.1"
+    mt5_bridge_port: int = Field(default=8090, ge=1, le=65535)
+    mt5_bridge_id: str = "mt5-local"
+    mt5_symbol: str = "EURUSD"
+    mt5_account_mode: Literal["hedging", "netting"] = "hedging"
+    mt5_entry_timeout_seconds: int = Field(default=60, ge=5, le=300)
+    mt5_manager_sweep_seconds: int = Field(default=60, ge=10, le=300)
+    mt5_enable_trade_commands: bool = False
+    mt5_shadow_mode: bool = True
 
     openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-5-mini"
@@ -77,6 +93,15 @@ class Settings(BaseSettings):
     @property
     def has_supabase_mcp_config(self) -> bool:
         return self.supabase_project_ref is not None and self.supabase_access_token is not None
+
+    @property
+    def supabase_db_dsn(self) -> str | None:
+        if self.supabase_db_url is None:
+            return None
+        value = self.supabase_db_url.get_secret_value().strip()
+        if value.startswith("SUPABASE_DB_URL="):
+            return value.split("=", 1)[1]
+        return value
 
 
 @lru_cache(maxsize=1)

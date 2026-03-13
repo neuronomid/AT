@@ -14,6 +14,7 @@ def _policy() -> RiskPolicy:
         max_spread_bps=Decimal("20"),
         max_trades_per_hour=6,
         cooldown_seconds=60,
+        min_expected_edge_bps=0.1,
     )
 
 
@@ -51,3 +52,26 @@ def test_risk_policy_rejects_wide_spread() -> None:
 
     assert result.approved is False
     assert "spread" in result.reason.lower()
+
+
+def test_risk_policy_rejects_negative_expected_edge() -> None:
+    result = _policy().evaluate(
+        decision=TradeDecision(
+            action="buy",
+            confidence=0.8,
+            rationale="weak expectancy",
+            expected_edge_bps=-1.0,
+        ),
+        account_snapshot=AccountSnapshot(cash=Decimal("2500"), buying_power=Decimal("5000"), crypto_status="ACTIVE"),
+        market_snapshot=MarketSnapshot(
+            symbol="ETH/USD",
+            timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            bid_price=Decimal("2000"),
+            ask_price=Decimal("2000.5"),
+        ),
+        order_manager=OrderManager(),
+        trades_this_hour=0,
+    )
+
+    assert result.approved is False
+    assert "expected edge" in result.reason.lower()

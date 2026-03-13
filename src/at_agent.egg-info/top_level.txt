@@ -1,9 +1,16 @@
 agents
 app
 brokers
+control_plane
+dashboard
+dashboard_api
 data
 evaluation
 execution
+feedback
 infra
 memory
+regime
+research
 risk
+runtime

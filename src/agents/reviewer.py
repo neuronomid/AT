@@ -87,7 +87,7 @@ class ReviewerAgent:
                 action = decision.get("action")
                 if isinstance(action, str):
                     action_counts[action] += 1
-                    if action in {"buy", "sell", "exit"}:
+                    if action in {"buy", "sell", "exit", "reduce"}:
                         executable_decisions += 1
                 approved = risk_decision.get("approved")
                 if approved is False:
@@ -162,6 +162,13 @@ class ReviewerAgent:
                     "Exit order filled and the ETH position was reduced.",
                     None,
                     ["Review whether exits happen because momentum truly broke down or because the rule is too reactive."],
+                )
+            if decision.action == "reduce" and after_account.open_position_qty < before_account.open_position_qty:
+                return (
+                    "position_reduced",
+                    "Reduce order filled and the ETH position was partially reduced.",
+                    None,
+                    ["Review whether scale-outs improve realized R or exit winners too early."],
                 )
             return (
                 "state_mismatch",

@@ -6,6 +6,7 @@ from app.config import get_settings
 from infra.logging import configure_logging, get_logger
 from memory.journal import Journal
 from memory.lessons import LessonStore
+from memory.supabase import SupabaseStore
 
 
 def main() -> None:
@@ -16,9 +17,12 @@ def main() -> None:
     journal = Journal(settings.journal_path)
     lesson_store = LessonStore(settings.lessons_path)
     reviewer = ReviewerAgent()
+    store = SupabaseStore(settings.supabase_db_dsn) if settings.supabase_db_dsn is not None else None
 
     summary = reviewer.summarize_journal(journal.read_all())
     inserted = lesson_store.add_many(summary.lessons)
+    if store is not None:
+        store.upsert_lessons(summary.lessons)
 
     output_path = Path(settings.review_summary_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

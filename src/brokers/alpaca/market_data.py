@@ -97,6 +97,7 @@ class AlpacaMarketDataService:
         if message_type == "q":
             return snapshot.model_copy(
                 update={
+                    "event_type": "quote",
                     "timestamp": self._parse_timestamp(payload["t"]),
                     "bid_price": self._to_decimal(payload.get("bp")),
                     "bid_size": self._to_decimal(payload.get("bs")),
@@ -108,6 +109,7 @@ class AlpacaMarketDataService:
         if message_type == "t":
             return snapshot.model_copy(
                 update={
+                    "event_type": "trade",
                     "timestamp": self._parse_timestamp(payload["t"]),
                     "last_trade_price": self._to_decimal(payload.get("p")),
                     "last_trade_size": self._to_decimal(payload.get("s")),

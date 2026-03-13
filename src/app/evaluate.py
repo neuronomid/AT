@@ -17,15 +17,26 @@ def main() -> None:
     journal = Journal(settings.journal_path)
     records = journal.read_all()
 
-    baseline_policy = AnalystAgent(policy_name="baseline")
+    baseline_policy = AnalystAgent()
     challenger_policy = AnalystAgent(
-        policy_name="challenger",
-        max_spread_bps=18.0,
-        exit_momentum_3_bps=-6.0,
-        exit_momentum_5_bps=-10.0,
-        entry_momentum_3_bps=6.0,
-        entry_momentum_5_bps=10.0,
-        max_volatility_5_bps=35.0,
+        policy_name="challenger@v2",
+        max_spread_bps=16.0,
+        min_regime_probability=0.62,
+        regime_trend_15_bps=16.0,
+        regime_trend_30_bps=32.0,
+        exit_momentum_3_bps=-3.5,
+        exit_momentum_5_bps=-7.0,
+        entry_momentum_3_bps=7.5,
+        entry_momentum_5_bps=12.0,
+        max_volatility_5_bps=20.0,
+        chaos_volatility_5_bps=34.0,
+        max_abs_zscore_30=1.8,
+        min_stop_loss_bps=10.0,
+        max_stop_loss_bps=28.0,
+        stop_loss_vol_multiplier=1.2,
+        trailing_stop_multiple=0.65,
+        time_stop_bars=10,
+        min_expected_edge_bps=1.0,
     )
 
     replay_engine = ReplayEngine()

@@ -23,12 +23,12 @@ class ReplayEngine:
         opened_trades = 0
         closed_trades = 0
         bars_in_position = 0
-        position_open = False
+        position_side = 0
         entry_price: float | None = None
 
         for index, record in enumerate(decision_records):
             market_snapshot = MarketSnapshot.model_validate(record["market_snapshot"])
-            account_snapshot = self._simulated_account(position_open)
+            account_snapshot = self._simulated_account(position_side)
             features = self._normalize_features(record.get("features", {}))
             decision = policy.analyze(market_snapshot, account_snapshot, features)
             action_counts[decision.action] += 1
@@ -38,32 +38,37 @@ class ReplayEngine:
                 equity_curve.append(realized_pnl_bps)
                 continue
 
-            if decision.action == "buy" and not position_open:
-                position_open = True
+            if decision.action == "buy" and position_side == 0:
+                position_side = 1
                 entry_price = price
                 executed_actions += 1
                 opened_trades += 1
-            elif decision.action == "exit" and position_open and entry_price is not None:
-                trade_return = self._trade_return_bps(entry_price, price)
+            elif decision.action == "sell" and position_side == 0:
+                position_side = -1
+                entry_price = price
+                executed_actions += 1
+                opened_trades += 1
+            elif decision.action == "exit" and position_side != 0 and entry_price is not None:
+                trade_return = self._trade_return_bps(entry_price, price, position_side)
                 trade_returns_bps.append(trade_return)
                 realized_pnl_bps += trade_return
                 executed_actions += 1
                 closed_trades += 1
-                position_open = False
+                position_side = 0
                 entry_price = None
 
             mark_to_market = realized_pnl_bps
-            if position_open and entry_price is not None:
+            if position_side != 0 and entry_price is not None:
                 bars_in_position += 1
-                mark_to_market += self._trade_return_bps(entry_price, price)
+                mark_to_market += self._trade_return_bps(entry_price, price, position_side)
             equity_curve.append(mark_to_market)
 
-            if index == len(decision_records) - 1 and position_open and entry_price is not None:
-                forced_return = self._trade_return_bps(entry_price, price)
+            if index == len(decision_records) - 1 and position_side != 0 and entry_price is not None:
+                forced_return = self._trade_return_bps(entry_price, price, position_side)
                 trade_returns_bps.append(forced_return)
                 realized_pnl_bps += forced_return
                 closed_trades += 1
-                position_open = False
+                position_side = 0
                 entry_price = None
                 equity_curve[-1] = realized_pnl_bps
 
@@ -122,15 +127,16 @@ class ReplayEngine:
                     return float(Decimal(str(value)))
         return None
 
-    def _simulated_account(self, position_open: bool) -> AccountSnapshot:
+    def _simulated_account(self, position_side: int) -> AccountSnapshot:
         return AccountSnapshot(
             cash=Decimal("2500"),
             buying_power=Decimal("5000"),
-            open_position_qty=Decimal("1") if position_open else Decimal("0"),
+            open_position_qty=Decimal(str(position_side)),
             crypto_status="ACTIVE",
         )
 
-    def _trade_return_bps(self, entry_price: float, exit_price: float) -> float:
+    def _trade_return_bps(self, entry_price: float, exit_price: float, position_side: int) -> float:
         if entry_price <= 0:
             return 0.0
-        return ((exit_price - entry_price) / entry_price) * 10000
+        direction = 1 if position_side >= 0 else -1
+        return (((exit_price - entry_price) / entry_price) * 10000) * direction
