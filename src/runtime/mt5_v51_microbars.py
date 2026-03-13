@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from data.mt5_v51_schemas import MT5V51Bar, MT5V51BridgeSnapshot
+from runtime.mt5_v51_symbols import mt5_v51_symbols_match, normalize_mt5_v51_symbol
 
 
 def _ensure_utc(value: datetime) -> datetime:
@@ -22,7 +23,7 @@ class MT5V51Synthetic20sBuilder:
         warmup_bars: int = 30,
         bucket_seconds: int = 20,
     ) -> None:
-        self._symbol = symbol.strip().upper()
+        self._symbol = normalize_mt5_v51_symbol(symbol)
         self._max_bars = max_bars
         self._warmup_bars = warmup_bars
         self._bucket_seconds = bucket_seconds
@@ -41,7 +42,7 @@ class MT5V51Synthetic20sBuilder:
         return len(self._closed)
 
     def enrich_snapshot(self, snapshot: MT5V51BridgeSnapshot) -> MT5V51BridgeSnapshot:
-        if snapshot.symbol.strip().upper() != self._symbol:
+        if not mt5_v51_symbols_match(snapshot.symbol, self._symbol):
             return snapshot
         received_at = _ensure_utc(snapshot.received_at) if snapshot.received_at is not None else None
         key = (received_at, _ensure_utc(snapshot.server_time))

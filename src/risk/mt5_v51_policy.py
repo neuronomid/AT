@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from data.mt5_v51_schemas import MT5V51BridgeSnapshot, MT5V51EntryDecision, MT5V51RiskDecision
 from data.schemas import TradeReflection
 from execution.mt5_v51_ticket_registry import MT5V51TicketRegistry
+from runtime.mt5_v51_symbols import mt5_v51_symbols_match, normalize_mt5_v51_symbol
 
 
 class MT5V51RiskPostureEngine:
@@ -46,7 +47,7 @@ class MT5V51RiskArbiter:
         max_trades_per_hour: int = 15,
         seeded_entry_times: Sequence[datetime] | None = None,
     ) -> None:
-        self._symbol = symbol
+        self._symbol = normalize_mt5_v51_symbol(symbol)
         self._account_mode = account_mode
         self._min_confidence = min_confidence
         self._max_spread_bps = max_spread_bps
@@ -79,7 +80,7 @@ class MT5V51RiskArbiter:
     ) -> MT5V51RiskDecision:
         if decision.action == "hold":
             return MT5V51RiskDecision(approved=False, reason="Entry decision is hold.", risk_posture=risk_posture)
-        if snapshot.symbol.strip().upper() != self._symbol.strip().upper():
+        if not mt5_v51_symbols_match(snapshot.symbol, self._symbol):
             return MT5V51RiskDecision(approved=False, reason="Snapshot symbol does not match runtime symbol.", risk_posture=risk_posture)
         if snapshot.account.account_mode != self._account_mode:
             return MT5V51RiskDecision(
@@ -114,6 +115,67 @@ class MT5V51RiskArbiter:
         return MT5V51RiskDecision(
             approved=True,
             reason="Entry passed MT5 V5.1 deterministic checks.",
+            risk_fraction=risk_fraction,
+            risk_posture=risk_posture,
+        )
+
+    def evaluate_immediate_entry(
+        self,
+        *,
+        decision: MT5V51EntryDecision,
+        snapshot: MT5V51BridgeSnapshot,
+        registry: MT5V51TicketRegistry,
+        risk_posture: str,
+        risk_multiplier: float,
+        pending_symbol_command: bool,
+    ) -> MT5V51RiskDecision:
+        if decision.action == "hold":
+            return MT5V51RiskDecision(approved=False, reason="Entry decision is hold.", risk_posture=risk_posture)
+        if not mt5_v51_symbols_match(snapshot.symbol, self._symbol):
+            return MT5V51RiskDecision(
+                approved=False,
+                reason="Snapshot symbol does not match runtime symbol.",
+                risk_posture=risk_posture,
+            )
+        if snapshot.account.account_mode != self._account_mode:
+            return MT5V51RiskDecision(
+                approved=False,
+                reason="MT5 account mode does not match runtime expectation.",
+                risk_posture=risk_posture,
+            )
+        if not snapshot.account.trade_allowed:
+            return MT5V51RiskDecision(approved=False, reason="MT5 account is not trade enabled.", risk_posture=risk_posture)
+        if pending_symbol_command:
+            return MT5V51RiskDecision(
+                approved=False,
+                reason="A pending command already exists for the symbol.",
+                risk_posture=risk_posture,
+            )
+        if self._daily_loss_triggered(snapshot):
+            return MT5V51RiskDecision(approved=False, reason="Daily loss kill switch is active.", risk_posture=risk_posture)
+        if registry.has_open_position(snapshot.symbol):
+            return MT5V51RiskDecision(
+                approved=False,
+                reason="A BTCUSD ticket is already open.",
+                risk_posture=risk_posture,
+            )
+        if self.recent_trade_count(snapshot.server_time) >= self._max_trades_per_hour:
+            return MT5V51RiskDecision(
+                approved=False,
+                reason="The rolling 60-minute entry cap has been reached.",
+                risk_posture=risk_posture,
+            )
+        adjusted_min = self._min_risk_fraction * risk_multiplier
+        adjusted_max = self._max_risk_fraction * risk_multiplier
+        requested = (
+            decision.requested_risk_fraction
+            if decision.requested_risk_fraction is not None
+            else (adjusted_min + adjusted_max) / 2.0
+        )
+        risk_fraction = max(adjusted_min, min(adjusted_max, requested))
+        return MT5V51RiskDecision(
+            approved=True,
+            reason="Entry passed immediate execution checks.",
             risk_fraction=risk_fraction,
             risk_posture=risk_posture,
         )

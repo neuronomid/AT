@@ -53,6 +53,12 @@ def test_mt5_v51_entry_analyst_prompt_uses_scalper_language() -> None:
     prompt = agent.build_prompt({"symbol": "BTCUSD"})
 
     assert "20s" in prompt
-    assert "1m as primary" in prompt
+    assert "recent_bars.1m" in prompt
+    assert "freshness.source_snapshot_age_bucket" in prompt
+    assert "microstructure" in prompt
     assert "long_trigger_ready" in prompt
-    assert "without waiting for perfect 5m agreement" in prompt
+    assert "long_continuation_ready" in prompt
+    assert "long_pause_after_impulse_ready" in prompt
+    assert "treat aging as acceptable" in prompt
+    assert "stair-step continuation" in prompt
+    assert "spread cost" in prompt

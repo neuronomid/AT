@@ -10,6 +10,7 @@ from data.mt5_v51_schemas import (
     MT5V51BridgeSnapshot,
     MT5V51ExecutionAck,
 )
+from runtime.mt5_v51_symbols import normalize_mt5_v51_symbol
 
 
 def _ensure_utc(value: datetime | None) -> datetime | None:
@@ -27,6 +28,7 @@ class MT5V51BridgeState:
         self._snapshot_queue: asyncio.Queue[MT5V51BridgeSnapshot] = asyncio.Queue()
         self._latest_snapshot: MT5V51BridgeSnapshot | None = None
         self._pending_commands: OrderedDict[str, MT5V51BridgeCommand] = OrderedDict()
+        self._inflight_commands: OrderedDict[str, MT5V51BridgeCommand] = OrderedDict()
         self._acks: deque[MT5V51ExecutionAck] = deque(maxlen=max_acks)
         self._health = MT5V51BridgeHealth(bridge_id=bridge_id)
 
@@ -37,13 +39,13 @@ class MT5V51BridgeState:
                 update={
                     "bridge_id": self._bridge_id,
                     "received_at": received_at,
-                    "pending_command_ids": list(self._pending_commands.keys()),
+                    "pending_command_ids": self._pending_command_ids(),
                     "health": self._health.model_copy(
                         update={
                             "connected": True,
                             "last_error": None,
                             "last_snapshot_at": received_at,
-                            "pending_command_count": len(self._pending_commands),
+                            "pending_command_count": self._pending_command_count(),
                         }
                     ),
                 }
@@ -69,7 +71,7 @@ class MT5V51BridgeState:
             self._health = self._health.model_copy(
                 update={
                     "last_command_at": now,
-                    "pending_command_count": len(self._pending_commands),
+                    "pending_command_count": self._pending_command_count(),
                 }
             )
 
@@ -78,11 +80,13 @@ class MT5V51BridgeState:
             now = datetime.now(timezone.utc)
             expired_ids = [
                 command_id
-                for command_id, command in self._pending_commands.items()
+                for commands in (self._pending_commands, self._inflight_commands)
+                for command_id, command in commands.items()
                 if (expires_at := _ensure_utc(command.expires_at)) is not None and expires_at <= now
             ]
             for command_id in expired_ids:
                 self._pending_commands.pop(command_id, None)
+                self._inflight_commands.pop(command_id, None)
                 self._acks.append(
                     MT5V51ExecutionAck(
                         command_id=command_id,
@@ -92,7 +96,10 @@ class MT5V51BridgeState:
                     )
                 )
             commands = list(self._pending_commands.values())[: max(1, limit)]
-            self._health = self._health.model_copy(update={"pending_command_count": len(self._pending_commands)})
+            for command in commands:
+                self._pending_commands.pop(command.command_id, None)
+                self._inflight_commands[command.command_id] = command
+            self._health = self._health.model_copy(update={"pending_command_count": self._pending_command_count()})
             return commands
 
     async def ack_command(self, ack: MT5V51ExecutionAck) -> None:
@@ -100,7 +107,8 @@ class MT5V51BridgeState:
             self._acks.append(ack)
             if ack.status in {"rejected", "filled", "partial_fill", "applied", "expired", "ignored"}:
                 self._pending_commands.pop(ack.command_id, None)
-            self._health = self._health.model_copy(update={"pending_command_count": len(self._pending_commands)})
+                self._inflight_commands.pop(ack.command_id, None)
+            self._health = self._health.model_copy(update={"pending_command_count": self._pending_command_count()})
 
     async def drain_acks(self) -> list[MT5V51ExecutionAck]:
         async with self._lock:
@@ -109,10 +117,19 @@ class MT5V51BridgeState:
             return drained
 
     async def has_pending_symbol(self, symbol: str) -> bool:
-        normalized = symbol.strip().upper()
+        normalized = normalize_mt5_v51_symbol(symbol)
         async with self._lock:
-            return any(command.symbol.strip().upper() == normalized for command in self._pending_commands.values())
+            return any(
+                normalize_mt5_v51_symbol(command.symbol) == normalized
+                for command in [*self._pending_commands.values(), *self._inflight_commands.values()]
+            )
 
     async def health(self) -> MT5V51BridgeHealth:
         async with self._lock:
             return self._health
+
+    def _pending_command_ids(self) -> list[str]:
+        return [*self._pending_commands.keys(), *self._inflight_commands.keys()]
+
+    def _pending_command_count(self) -> int:
+        return len(self._pending_commands) + len(self._inflight_commands)

@@ -68,3 +68,11 @@ def test_mt5_v51_microbars_trim_lookback_and_track_warmup() -> None:
 
     assert builder.warmup_complete() is True
     assert builder.closed_bar_count() == 3
+
+
+def test_mt5_v51_microbars_accept_broker_symbol_alias() -> None:
+    builder = MT5V51Synthetic20sBuilder("BTCUSD", warmup_bars=1)
+    builder.enrich_snapshot(_snapshot(elapsed_seconds=1, midpoint=Decimal("60000")).model_copy(update={"symbol": "BTCUSD@"}))
+    enriched = builder.enrich_snapshot(_snapshot(elapsed_seconds=21, midpoint=Decimal("60010")).model_copy(update={"symbol": "BTCUSD@"}))
+
+    assert len(enriched.bars_20s) == 1

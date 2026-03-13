@@ -17,7 +17,7 @@ class V51Settings(BaseSettings):
     v51_bridge_id: str = "mt5-v51-local"
     v51_mt5_symbol: str = "BTCUSD"
     v51_mt5_account_mode: Literal["hedging", "netting"] = "hedging"
-    v51_mt5_entry_timeout_seconds: int = Field(default=60, ge=5, le=60)
+    v51_mt5_entry_timeout_seconds: int = Field(default=15, ge=5, le=60)
     v51_mt5_manager_sweep_seconds: int = Field(default=15, ge=5, le=60)
     v51_mt5_enable_trade_commands: bool = False
     v51_mt5_shadow_mode: bool = True
@@ -29,7 +29,8 @@ class V51Settings(BaseSettings):
     v51_max_risk_fraction: float = Field(default=0.005, gt=0, le=1)
     v51_max_daily_loss_pct: float = Field(default=0.015, gt=0, le=1)
     v51_micro_lookback_bars: int = Field(default=90, ge=30)
-    v51_micro_min_warmup_bars: int = Field(default=30, ge=10)
+    v51_micro_min_warmup_bars: int = Field(default=6, ge=6)
+    v51_min_hold_bars: int = Field(default=2, ge=1, le=6)
     v51_partial_target_r: float = Field(default=0.5, gt=0, le=2)
     v51_final_target_r: float = Field(default=1.0, gt=0, le=3)
     v51_post_partial_stop_lock_r: float = Field(default=0.0, ge=0, le=1)
@@ -37,7 +38,7 @@ class V51Settings(BaseSettings):
     v51_openrouter_api_key: SecretStr | None = None
     v51_openrouter_model: str = "deepseek/deepseek-v3.2"
     v51_openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    v51_entry_reasoning_enabled: bool = True
+    v51_entry_reasoning_enabled: bool = False
     v51_manager_reasoning_enabled: bool = False
 
     supabase_db_url: SecretStr | None = None

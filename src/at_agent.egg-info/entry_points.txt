@@ -11,4 +11,5 @@ at-agent-strategy-review = app.strategy_review:main
 at-agent-v3-2-research = app.v3_2_research:main
 at-agent-v3-research = app.v3_research:main
 at-agent-v4-live = app.v4_live:main
+at-agent-v5-1-mt5 = app.v5_1_mt5:main
 at-agent-v5-mt5 = app.v5_mt5:main

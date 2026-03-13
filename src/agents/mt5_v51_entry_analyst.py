@@ -16,17 +16,23 @@ Rules:
 - Output JSON only.
 - Use exactly these keys: action, confidence, rationale, thesis_tags, requested_risk_fraction, context_signature
 - Valid actions: enter_long, enter_short, hold
-- This strategy is a 1-minute scalper. The 1m chart is the primary decision timeframe.
-- The 20s chart is for timing and micro confirmation. The 5m chart is only a background hint, not a hard gate.
-- Be willing to trade strong 1m momentum. One, two, or three back-to-back strong same-direction 1m candles are enough to justify a scalp when the move still has follow-through.
-- Prefer continuation or shallow-pullback entries when 1m is moving cleanly and 20s is supportive or at least not aggressively opposite.
-- Do not reject a trade only because momentum is strong, price is extended, or the 5m hint lags the 1m move.
-- Prefer hold when the setup is choppy, spread is poor, the 1m impulse is already stalling, or the 20s tape is clearly and aggressively opposite the 1m setup.
-- Treat recent feedback as a weak hint only. Never let feedback alone veto a clean 1m momentum scalp.
+- This is a fast 1-minute scalper. Read recent_bars.1m first and timeframes.1m second.
+- Use recent_bars.20s only for timing and micro confirmation.
+- Use timeframes.5m and levels.5m only as background context, not as a hard gate.
+- Be willing to trade clean 1m momentum or shallow-pullback continuation when the move still has follow-through.
+- Treat timeframes.1m.long_trigger_ready or short_trigger_ready as serious scalp opportunities unless freshness or microstructure is poor.
+- Treat timeframes.1m.long_continuation_ready or short_continuation_ready as serious opportunities for orderly stair-step continuation, even when the latest candle is not a huge ATR-expansion bar.
+- Treat timeframes.1m.long_pause_after_impulse_ready or short_pause_after_impulse_ready as serious opportunities. One tiny pause or counter candle after a strong directional burst does not cancel the scalp.
+- A clean sequence of 3 to 6 same-direction 1m candles with positive EMA separation is actionable momentum, not a reason to wait for a pullback.
+- Do not let one tiny opposite or flat 1m candle invalidate a clean directional burst when the 1m EMA gap and 3-bar versus 5-bar returns still agree with the move.
+- Mild 20s disagreement should not veto a clean 1m continuation. Only aggressive opposite 20s structure should veto it.
+- Treat freshness.source_snapshot_age_bucket = aging as acceptable for a scalp when the move is clean. Only stale_soon or stale should materially veto an otherwise valid setup.
+- Prefer hold when freshness is not fresh, spread cost is expensive, the 1m impulse is already stalling, or the 20s tape is clearly and aggressively opposite.
+- Treat feedback avoid_tags and reinforce_tags as weak hints only. Never let feedback alone veto a clean 1m momentum scalp.
 - Never emit prices, stop losses, take profits, lot sizes, or broker commands.
 - Requested risk fraction must stay between 0.002 and 0.005 when present.
 - Thesis tags must be short and concrete.
-- Be responsive and willing to trade when the 1m tape shows obvious momentum.
+- Respond decisively when the 1m tape is clean.
 """.strip()
 
 
@@ -73,11 +79,14 @@ class MT5V51EntryAnalystAgent:
         return (
             "Return only JSON for the entry decision.\n"
             'Schema: {"action","confidence","rationale","thesis_tags","requested_risk_fraction","context_signature"}.\n'
-            'Treat 1m as primary, 20s as timing, and 5m as a hint.\n'
-            'If the 1m packet shows long_trigger_ready or short_trigger_ready, treat that as a serious scalp opportunity.\n'
-            'Example hold: {"action":"hold","confidence":0.30,"rationale":"1m is choppy and the 20s tape is not supporting either side","thesis_tags":["chop"],"requested_risk_fraction":null,"context_signature":"..."}\n'
-            'Example long: {"action":"enter_long","confidence":0.72,"rationale":"1m shows back-to-back bullish impulse candles and the 20s tape is not opposing the move, so the scalp long is still actionable even though 5m is only a mild hint","thesis_tags":["impulse","continuation"],"requested_risk_fraction":0.004,"context_signature":"..."}\n'
-            'Example short: {"action":"enter_short","confidence":0.70,"rationale":"1m shows heavy bearish candles with short_trigger_ready and the 20s tape is pressing lower, so the short scalp is actionable without waiting for perfect 5m agreement","thesis_tags":["impulse","breakdown"],"requested_risk_fraction":0.003,"context_signature":"..."}\n'
+            'Read recent_bars.1m as the primary tape, recent_bars.20s as timing, and timeframes.5m plus levels as backdrop.\n'
+            'Use microstructure for spread cost and short bid/ask drift. Use freshness.source_snapshot_age_bucket to avoid stale reads, but treat aging as acceptable when the move is otherwise clean.\n'
+            'If timeframes.1m.long_trigger_ready, short_trigger_ready, long_continuation_ready, short_continuation_ready, long_pause_after_impulse_ready, or short_pause_after_impulse_ready is true, treat it as a serious scalp opportunity unless freshness or spread cost is poor.\n'
+            'One tiny opposite or flat 1m candle after a strong directional burst does not cancel the continuation by itself when EMA gap and 3-bar versus 5-bar returns still agree.\n'
+            'Do not wait for a giant breakout candle if recent_bars.1m already show a clean 3 to 6 candle stair-step continuation with positive EMA gap.\n'
+            'Example hold: {"action":"hold","confidence":0.31,"rationale":"1m is stalling, spread cost is elevated, and the 20s tape is not supporting a fresh entry","thesis_tags":["stall","spread_cost"],"requested_risk_fraction":null,"context_signature":"..."}\n'
+            'Example long: {"action":"enter_long","confidence":0.74,"rationale":"recent_bars.1m show a clean bullish stair-step continuation with positive EMA gap and the 20s tape is not aggressively opposing the move","thesis_tags":["momentum","continuation"],"requested_risk_fraction":0.004,"context_signature":"..."}\n'
+            'Example short: {"action":"enter_short","confidence":0.72,"rationale":"recent_bars.1m show orderly bearish continuation, 20s is confirming or neutral, and spread cost is still acceptable","thesis_tags":["momentum","breakdown"],"requested_risk_fraction":0.003,"context_signature":"..."}\n'
             f"Context packet:\n{json.dumps(context_packet, default=str, separators=(',', ':'))}"
         )
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 from data.mt5_v51_schemas import (
@@ -13,6 +13,7 @@ from data.mt5_v51_schemas import (
     MT5V51TicketRecord,
 )
 from memory.supabase_mt5_v51 import SupabaseMT5V51Store
+from runtime.mt5_v51_symbols import normalize_mt5_v51_symbol
 
 
 @dataclass
@@ -59,7 +60,14 @@ class MT5V51TicketRegistry:
         if ack.status in {"rejected", "expired", "ignored"}:
             self._pending_entries.pop(ack.command_id, None)
             return
-        if ack.ticket_id is None:
+        if not self._has_live_ticket_id(ack.ticket_id):
+            plan = pending["plan"]
+            if ack.fill_price is not None:
+                plan["acked_fill_price"] = ack.fill_price
+            if ack.fill_volume_lots is not None:
+                plan["acked_fill_volume_lots"] = ack.fill_volume_lots
+            if ack.broker_time is not None:
+                plan["acked_opened_at"] = ack.broker_time
             return
         plan = dict(pending["plan"])
         command = dict(pending["command"])
@@ -131,8 +139,8 @@ class MT5V51TicketRegistry:
     def all(self, symbol: str | None = None) -> list[MT5V51TicketRecord]:
         if symbol is None:
             return list(self._records.values())
-        normalized = symbol.strip().upper()
-        return [ticket for ticket in self._records.values() if ticket.symbol.strip().upper() == normalized]
+        normalized = normalize_mt5_v51_symbol(symbol)
+        return [ticket for ticket in self._records.values() if normalize_mt5_v51_symbol(ticket.symbol) == normalized]
 
     def by_ticket_id(self, ticket_id: str) -> MT5V51TicketRecord | None:
         return self._records.get(ticket_id)
@@ -229,16 +237,52 @@ class MT5V51TicketRegistry:
         entry_command_id: str | None,
     ) -> MT5V51TicketRecord:
         metadata = dict((payload or {}).get("metadata", {}))
-        entry_price = Decimal(str(payload.get("metadata", {}).get("entry_price", live.open_price))) if payload else live.open_price
-        stop_loss = live.stop_loss or Decimal(str(metadata.get("initial_stop_loss", live.stop_loss or entry_price)))
-        hard_tp = live.take_profit or Decimal(str(metadata.get("hard_take_profit", live.take_profit or entry_price)))
-        soft_tp1 = Decimal(str(metadata.get("soft_take_profit_1", self._default_soft_target(entry_price, stop_loss, side=live.side, multiple=Decimal("0.5")))))
-        soft_tp2 = Decimal(str(metadata.get("soft_take_profit_2", self._default_soft_target(entry_price, stop_loss, side=live.side, multiple=Decimal("1.0")))))
-        r_distance = abs(entry_price - stop_loss)
-        if r_distance <= 0:
-            r_distance = snapshot.symbol_spec.tick_size
+        entry_price = (
+            Decimal(str((payload or {}).get("acked_fill_price", (payload or {}).get("metadata", {}).get("entry_price", live.open_price)))
+            )
+            if payload
+            else live.open_price
+        )
+        stop_loss = live.stop_loss
+        if stop_loss is None and "initial_stop_loss" in metadata:
+            stop_loss = Decimal(str(metadata["initial_stop_loss"]))
+        hard_tp = live.take_profit
+        if hard_tp is None and "hard_take_profit" in metadata:
+            hard_tp = Decimal(str(metadata["hard_take_profit"]))
+        r_distance = self._resolve_r_distance(
+            live=live,
+            snapshot=snapshot,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            metadata=metadata,
+        )
+        if stop_loss is None:
+            stop_loss = self._default_stop_from_r(entry_price=entry_price, r_distance=r_distance, side=live.side)
+        if hard_tp is None:
+            hard_tp = self._default_soft_target(entry_price, stop_loss, side=live.side, multiple=Decimal("1.0"))
+        soft_tp1 = Decimal(
+            str(
+                metadata.get(
+                    "soft_take_profit_1",
+                    self._default_soft_target(entry_price, stop_loss, side=live.side, multiple=Decimal("0.5")),
+                )
+            )
+        )
+        soft_tp2 = Decimal(
+            str(
+                metadata.get(
+                    "soft_take_profit_2",
+                    self._default_soft_target(entry_price, stop_loss, side=live.side, multiple=Decimal("1.0")),
+                )
+            )
+        )
         risk_amount_usd = Decimal(str(metadata.get("risk_amount_usd", self._fallback_risk_amount(live=live, snapshot=snapshot, r_distance=r_distance))))
-        volume = Decimal(str((payload or {}).get("volume_lots", live.volume_lots)))
+        volume = Decimal(str((payload or {}).get("acked_fill_volume_lots", (payload or {}).get("volume_lots", live.volume_lots))))
+        opened_at = (
+            (payload or {}).get("acked_opened_at")
+            if payload and (payload or {}).get("acked_opened_at") is not None
+            else (live.opened_at or snapshot.server_time)
+        )
         return MT5V51TicketRecord(
             ticket_id=live.ticket_id,
             symbol=live.symbol,
@@ -264,7 +308,7 @@ class MT5V51TicketRegistry:
             context_signature=metadata.get("context_signature"),
             followed_lessons=list(metadata.get("followed_lessons", [])),
             metadata=metadata,
-            opened_at=live.opened_at or snapshot.server_time,
+            opened_at=opened_at,
             last_seen_at=snapshot.server_time,
             unrealized_pnl_usd=live.unrealized_pnl_usd,
             unrealized_r=0.0,
@@ -332,3 +376,43 @@ class MT5V51TicketRegistry:
     def _fallback_risk_amount(self, *, live: MT5V51LiveTicket, snapshot: MT5V51BridgeSnapshot, r_distance: Decimal) -> Decimal:
         ticks = r_distance / snapshot.symbol_spec.tick_size
         return ticks * snapshot.symbol_spec.tick_value * live.volume_lots
+
+    def _resolve_r_distance(
+        self,
+        *,
+        live: MT5V51LiveTicket,
+        snapshot: MT5V51BridgeSnapshot,
+        entry_price: Decimal,
+        stop_loss: Decimal | None,
+        metadata: dict[str, Any],
+    ) -> Decimal:
+        if "r_distance_price" in metadata:
+            r_distance = Decimal(str(metadata["r_distance_price"]))
+            if r_distance > 0:
+                return r_distance
+        if stop_loss is not None:
+            r_distance = abs(entry_price - stop_loss)
+            if r_distance > 0:
+                return r_distance
+        fallback = max(
+            snapshot.symbol_spec.min_stop_distance_price,
+            snapshot.symbol_spec.tick_size * Decimal("100"),
+            entry_price * Decimal("0.0007"),
+        )
+        ticks = (fallback / snapshot.symbol_spec.tick_size).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        return ticks * snapshot.symbol_spec.tick_size
+
+    def _default_stop_from_r(self, *, entry_price: Decimal, r_distance: Decimal, side: str) -> Decimal:
+        if side == "long":
+            return entry_price - r_distance
+        return entry_price + r_distance
+
+    def _has_live_ticket_id(self, ticket_id: str | None) -> bool:
+        if ticket_id is None:
+            return False
+        stripped = ticket_id.strip()
+        if not stripped:
+            return False
+        if stripped.isdigit():
+            return int(stripped) > 0
+        return stripped != "0"

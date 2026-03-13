@@ -45,6 +45,7 @@ class MT5V51EntryPlanner:
         atr = self._atr_price(bars[-14:])
         if atr <= 0:
             return None
+        previous_candle_shadow = self._previous_candle_shadow_size(bars[-1], side=side)
 
         lows = [bar.low_price for bar in bars[-20:]]
         highs = [bar.high_price for bar in bars[-20:]]
@@ -62,10 +63,11 @@ class MT5V51EntryPlanner:
 
         min_r_distance = max(
             atr * Decimal("0.80"),
+            previous_candle_shadow,
             self._minimum_broker_protection_distance(snapshot),
             snapshot.symbol_spec.tick_size,
         )
-        max_r_distance = atr * Decimal("2.20")
+        max_r_distance = max(atr * Decimal("2.20"), min_r_distance)
         r_distance = min(max(raw_r_distance, min_r_distance), max_r_distance)
         if r_distance <= 0:
             return None
@@ -142,8 +144,8 @@ class MT5V51EntryPlanner:
             basket_id=plan.basket_id,
             side=plan.side,
             volume_lots=plan.volume_lots,
-            stop_loss=None,
-            take_profit=None,
+            stop_loss=plan.stop_loss,
+            take_profit=plan.take_profit,
             comment=plan.comment,
             magic_number=plan.magic_number,
             reason=reason,
@@ -156,7 +158,7 @@ class MT5V51EntryPlanner:
                 "soft_take_profit_1": float(plan.soft_take_profit_1),
                 "soft_take_profit_2": float(plan.soft_take_profit_2),
                 "hard_take_profit": float(plan.take_profit),
-                "attach_protection_after_fill": True,
+                "attach_protection_after_fill": False,
                 "thesis_tags": thesis_tags,
                 "context_signature": context_signature,
                 "followed_lessons": followed_lessons,
@@ -172,10 +174,22 @@ class MT5V51EntryPlanner:
         created_at: datetime,
         expires_at: datetime,
     ) -> MT5V51BridgeCommand | None:
-        levels = self.protection_levels(ticket=ticket, snapshot=snapshot)
-        if levels is None:
+        action = "attach_initial_stop"
+        stop_loss: Decimal | None
+        take_profit: Decimal | None
+        if ticket.partial_stage >= 1:
+            levels = self._post_partial_protection_levels(ticket=ticket, snapshot=snapshot)
+            if levels is None:
+                return None
+            stop_loss, take_profit = levels
+            action = "attach_post_partial_protection"
+        else:
+            stop_loss = self._initial_protection_stop(ticket=ticket, snapshot=snapshot)
+            if stop_loss is None:
+                return None
+            take_profit = None
+        if stop_loss is None:
             return None
-        stop_loss, take_profit = levels
         return MT5V51BridgeCommand(
             command_id=f"protect-{ticket.ticket_id}-{int(created_at.timestamp())}",
             command_type="modify_ticket",
@@ -187,10 +201,31 @@ class MT5V51EntryPlanner:
             stop_loss=stop_loss,
             take_profit=take_profit,
             reason=reason,
-            metadata={"action": "attach_protection"},
+            metadata={"action": action},
         )
 
-    def protection_levels(
+    def _initial_protection_stop(
+        self,
+        *,
+        ticket: MT5V51TicketRecord,
+        snapshot: MT5V51BridgeSnapshot,
+    ) -> Decimal | None:
+        min_distance = self._minimum_broker_protection_distance(snapshot)
+        tick_size = snapshot.symbol_spec.tick_size
+        if ticket.side == "long":
+            max_valid_stop = self._round_down_to_tick(snapshot.bid - min_distance, tick_size)
+            stop_loss = min(self._round_down_to_tick(ticket.initial_stop_loss, tick_size), max_valid_stop)
+            if stop_loss <= 0 or stop_loss >= snapshot.bid:
+                return None
+            return stop_loss
+
+        min_valid_stop = self._round_up_to_tick(snapshot.ask + min_distance, tick_size)
+        stop_loss = max(self._round_up_to_tick(ticket.initial_stop_loss, tick_size), min_valid_stop)
+        if stop_loss <= snapshot.ask:
+            return None
+        return stop_loss
+
+    def _post_partial_protection_levels(
         self,
         *,
         ticket: MT5V51TicketRecord,
@@ -201,7 +236,7 @@ class MT5V51EntryPlanner:
         if ticket.side == "long":
             max_valid_stop = self._round_down_to_tick(snapshot.bid - min_distance, tick_size)
             min_valid_take_profit = self._round_up_to_tick(snapshot.ask + min_distance, tick_size)
-            stop_loss = min(self._round_down_to_tick(ticket.initial_stop_loss, tick_size), max_valid_stop)
+            stop_loss = min(self._round_down_to_tick(ticket.open_price, tick_size), max_valid_stop)
             take_profit = max(self._round_up_to_tick(ticket.hard_take_profit, tick_size), min_valid_take_profit)
             if stop_loss <= 0 or stop_loss >= snapshot.bid or take_profit <= snapshot.ask:
                 return None
@@ -209,7 +244,7 @@ class MT5V51EntryPlanner:
 
         min_valid_stop = self._round_up_to_tick(snapshot.ask + min_distance, tick_size)
         max_valid_take_profit = self._round_down_to_tick(snapshot.bid - min_distance, tick_size)
-        stop_loss = max(self._round_up_to_tick(ticket.initial_stop_loss, tick_size), min_valid_stop)
+        stop_loss = max(self._round_up_to_tick(ticket.open_price, tick_size), min_valid_stop)
         take_profit = min(self._round_down_to_tick(ticket.hard_take_profit, tick_size), max_valid_take_profit)
         if stop_loss <= snapshot.ask or take_profit <= 0 or take_profit >= snapshot.bid:
             return None
@@ -235,7 +270,7 @@ class MT5V51EntryPlanner:
     def _minimum_broker_protection_distance(self, snapshot: MT5V51BridgeSnapshot) -> Decimal:
         spread_price = snapshot.ask - snapshot.bid
         safety_buffer = snapshot.symbol_spec.tick_size * self._broker_stop_buffer_ticks
-        return snapshot.symbol_spec.min_stop_distance_price + spread_price + safety_buffer
+        return snapshot.symbol_spec.min_stop_distance_price + spread_price + max(spread_price, safety_buffer)
 
     def _closed_bars(self, snapshot: MT5V51BridgeSnapshot) -> list:
         return [bar for bar in snapshot.bars_1m if bar.complete]
@@ -256,6 +291,13 @@ class MT5V51EntryPlanner:
         if not true_ranges:
             return Decimal("0")
         return sum(true_ranges) / Decimal(len(true_ranges))
+
+    def _previous_candle_shadow_size(self, bar, *, side: str) -> Decimal:
+        if side == "long":
+            body_floor = min(bar.open_price, bar.close_price)
+            return max(Decimal("0"), body_floor - bar.low_price)
+        body_ceiling = max(bar.open_price, bar.close_price)
+        return max(Decimal("0"), bar.high_price - body_ceiling)
 
     def _round_down_volume(self, value: Decimal, snapshot: MT5V51BridgeSnapshot) -> Decimal:
         if value <= 0:

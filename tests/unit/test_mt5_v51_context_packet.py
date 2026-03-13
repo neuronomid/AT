@@ -8,7 +8,7 @@ from runtime.mt5_v51_context_packet import MT5V51ContextBuilder
 
 
 def _bars(*, timeframe: str, count: int, step_seconds: int, price_step: Decimal) -> list[MT5V51Bar]:
-    base = datetime(2026, 3, 12, 12, 0, tzinfo=timezone.utc)
+    base = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=step_seconds * count)
     bars: list[MT5V51Bar] = []
     price = Decimal("60000")
     for index in range(count):
@@ -39,9 +39,10 @@ def _bars(*, timeframe: str, count: int, step_seconds: int, price_step: Decimal)
 
 
 def _snapshot() -> MT5V51BridgeSnapshot:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
     return MT5V51BridgeSnapshot(
-        server_time=datetime(2026, 3, 12, 12, 30, tzinfo=timezone.utc),
-        received_at=datetime(2026, 3, 12, 12, 30, tzinfo=timezone.utc),
+        server_time=now,
+        received_at=now,
         symbol="BTCUSD",
         bid=Decimal("60300"),
         ask=Decimal("60302"),
@@ -65,6 +66,85 @@ def _snapshot() -> MT5V51BridgeSnapshot:
     )
 
 
+def _continuation_bars(*, timeframe: str, count: int, step_seconds: int) -> list[MT5V51Bar]:
+    base = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=step_seconds * count)
+    bars: list[MT5V51Bar] = []
+    close = Decimal("60000")
+    for index in range(count):
+        end_at = base + timedelta(seconds=step_seconds * index)
+        start_at = end_at - timedelta(seconds=step_seconds)
+        if index < count - 5:
+            close += Decimal("3")
+            open_price = close - Decimal("2")
+            high_price = close + Decimal("10")
+            low_price = close - Decimal("18")
+        else:
+            close += Decimal("6")
+            open_price = close - Decimal("4")
+            high_price = close + Decimal("1")
+            low_price = close - Decimal("5")
+        bars.append(
+            MT5V51Bar(
+                timeframe=timeframe,
+                start_at=start_at,
+                end_at=end_at,
+                open_price=open_price,
+                high_price=high_price,
+                low_price=low_price,
+                close_price=close,
+                tick_volume=120 + index,
+            )
+        )
+    return bars
+
+
+def _bear_pause_after_impulse_bars(*, timeframe: str, count: int, step_seconds: int) -> list[MT5V51Bar]:
+    base = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=step_seconds * count)
+    bars: list[MT5V51Bar] = []
+    close = Decimal("60000")
+    for index in range(count):
+        end_at = base + timedelta(seconds=step_seconds * index)
+        start_at = end_at - timedelta(seconds=step_seconds)
+        if index < count - 4:
+            close += Decimal("2")
+            open_price = close - Decimal("3")
+            high_price = close + Decimal("6")
+            low_price = close - Decimal("8")
+        elif index == count - 4:
+            close -= Decimal("48")
+            open_price = close + Decimal("34")
+            high_price = close + Decimal("36")
+            low_price = close - Decimal("18")
+        elif index == count - 3:
+            close -= Decimal("44")
+            open_price = close + Decimal("30")
+            high_price = close + Decimal("32")
+            low_price = close - Decimal("16")
+        elif index == count - 2:
+            close -= Decimal("36")
+            open_price = close + Decimal("24")
+            high_price = close + Decimal("26")
+            low_price = close - Decimal("14")
+        else:
+            close += Decimal("1")
+            open_price = close - Decimal("1")
+            high_price = close + Decimal("1")
+            low_price = close - Decimal("1")
+        bars.append(
+            MT5V51Bar(
+                timeframe=timeframe,
+                start_at=start_at,
+                end_at=end_at,
+                open_price=open_price,
+                high_price=high_price,
+                low_price=low_price,
+                close_price=close,
+                tick_volume=150 + index,
+            )
+        )
+    return bars
+
+
 def _reflections() -> list[TradeReflection]:
     base = datetime(2026, 3, 12, 12, 0, tzinfo=timezone.utc)
     return [
@@ -83,7 +163,7 @@ def _reflections() -> list[TradeReflection]:
             exit_reason="tp",
             thesis_tags=["trend"],
         )
-        for index in range(4)
+        for index in range(5)
     ]
 
 
@@ -94,8 +174,8 @@ def _lessons() -> list[LessonRecord]:
             category="v5_1_feedback",
             message="avoid-match",
             confidence=0.5,
-            source="test",
-            metadata={"polarity": "avoid", "context_signature": "bull|bull|bull|tight"},
+            source="4",
+            metadata={"polarity": "avoid", "context_signature": "bull|bull|bull|tight", "feedback_tags": ["respect_invalidation"]},
         )
     ] + [
         LessonRecord(
@@ -103,16 +183,24 @@ def _lessons() -> list[LessonRecord]:
             category="v5_1_feedback",
             message="reinforce-match",
             confidence=0.5,
-            source="test",
-            metadata={"polarity": "reinforce", "context_signature": "bull|bull|bull|tight"},
+            source="3",
+            metadata={"polarity": "reinforce", "context_signature": "bull|bull|bull|tight", "feedback_tags": ["micro_confirm"]},
         )
     ] + [
+        LessonRecord(
+            lesson_id="avoid-old",
+            category="v5_1_feedback",
+            message="avoid-old",
+            confidence=0.5,
+            source="0",
+            metadata={"polarity": "avoid", "context_signature": "bull|bull|bull|tight"},
+        ),
         LessonRecord(
             lesson_id="avoid-mismatch",
             category="v5_1_feedback",
             message="avoid-mismatch",
             confidence=0.5,
-            source="test",
+            source="2",
             metadata={"polarity": "avoid", "context_signature": "bear|bear|bear|tight"},
         ),
         LessonRecord(
@@ -120,7 +208,7 @@ def _lessons() -> list[LessonRecord]:
             category="v5_1_feedback",
             message="missing-signature",
             confidence=0.5,
-            source="test",
+            source="1",
             metadata={"polarity": "avoid"},
         ),
     ]
@@ -128,8 +216,11 @@ def _lessons() -> list[LessonRecord]:
 
 def test_mt5_v51_context_packet_uses_scalper_timeframes_only() -> None:
     builder = MT5V51ContextBuilder()
+    snapshot = _snapshot()
+    builder.observe_snapshot(snapshot.model_copy(update={"received_at": snapshot.received_at - timedelta(seconds=8), "server_time": snapshot.server_time - timedelta(seconds=8), "bid": Decimal("60290"), "ask": Decimal("60292"), "spread_bps": 0.28}))
+    builder.observe_snapshot(snapshot.model_copy(update={"received_at": snapshot.received_at - timedelta(seconds=4), "server_time": snapshot.server_time - timedelta(seconds=4), "bid": Decimal("60296"), "ask": Decimal("60298"), "spread_bps": 0.29}))
     packet = builder.build_entry_packet(
-        snapshot=_snapshot(),
+        snapshot=snapshot,
         registry=MT5V51TicketRegistry(),
         risk_posture="neutral",
         reflections=_reflections(),
@@ -137,9 +228,19 @@ def test_mt5_v51_context_packet_uses_scalper_timeframes_only() -> None:
     )
 
     assert set(packet["timeframes"]) == {"20s", "1m", "5m"}
-    assert len(packet["feedback"]["recent_trades"]) == 3
-    assert packet["feedback"]["avoid"] == ["avoid-match"]
-    assert packet["feedback"]["reinforce"] == ["reinforce-match"]
+    assert "symbol_spec" not in packet
+    assert "account" not in packet
+    assert "open_exposure" not in packet
+    assert packet["freshness"]["source_snapshot_age_bucket"] == "fresh"
+    assert packet["microstructure"]["spread_percentile_1m"] is not None
+    assert packet["microstructure"]["bid_drift_bps_10s"] > 0
+    assert len(packet["recent_bars"]["20s"]) == 12
+    assert len(packet["recent_bars"]["1m"]) == 8
+    assert len(packet["feedback"]["recent_outcomes"]) == 4
+    assert packet["feedback"]["avoid_tags"] == ["respect_invalidation"]
+    assert packet["feedback"]["reinforce_tags"] == ["micro_confirm"]
+    assert "distance_to_swing_high_20_bps" in packet["levels"]["1m"]
+    assert "distance_to_swing_low_12_bps" in packet["levels"]["5m"]
     for summary in packet["timeframes"].values():
         assert "rsi_14" not in summary
         assert "adx_14" not in summary
@@ -151,13 +252,49 @@ def test_mt5_v51_context_packet_uses_scalper_timeframes_only() -> None:
     assert packet["timeframes"]["1m"]["consecutive_strong_bull_bars"] >= 2
 
 
-def test_mt5_v51_context_builder_detects_preflight_alignment_flip() -> None:
+def test_mt5_v51_context_packet_flags_stair_step_continuation_without_big_impulse() -> None:
+    builder = MT5V51ContextBuilder()
     snapshot = _snapshot().model_copy(
         update={
-            "bars_20s": _bars(timeframe="20s", count=40, step_seconds=20, price_step=Decimal("-4")),
-            "bars_1m": _bars(timeframe="1m", count=40, step_seconds=60, price_step=Decimal("-8")),
+            "bars_1m": _continuation_bars(timeframe="1m", count=30, step_seconds=60),
+            "bars_20s": _continuation_bars(timeframe="20s", count=45, step_seconds=20),
         }
     )
-    builder = MT5V51ContextBuilder()
 
-    assert builder.preflight_alignment_flipped(snapshot=snapshot, action="enter_long") is True
+    packet = builder.build_entry_packet(
+        snapshot=snapshot,
+        registry=MT5V51TicketRegistry(),
+        risk_posture="neutral",
+        reflections=[],
+        lessons=[],
+    )
+
+    one_minute = packet["timeframes"]["1m"]
+    assert one_minute["long_continuation_ready"] is True
+    assert one_minute["long_continuation_score"] >= 7
+    assert one_minute["strong_bull_bars_last_3"] == 0
+    assert one_minute["long_trigger_ready"] is True
+
+
+def test_mt5_v51_context_packet_keeps_short_continuation_alive_through_tiny_pause() -> None:
+    builder = MT5V51ContextBuilder()
+    snapshot = _snapshot().model_copy(
+        update={
+            "bars_1m": _bear_pause_after_impulse_bars(timeframe="1m", count=30, step_seconds=60),
+            "bars_20s": _bear_pause_after_impulse_bars(timeframe="20s", count=45, step_seconds=20),
+        }
+    )
+
+    packet = builder.build_entry_packet(
+        snapshot=snapshot,
+        registry=MT5V51TicketRegistry(),
+        risk_posture="neutral",
+        reflections=[],
+        lessons=[],
+    )
+
+    one_minute = packet["timeframes"]["1m"]
+    assert one_minute["direction"] == "bull"
+    assert one_minute["short_pause_after_impulse_ready"] is True
+    assert one_minute["short_continuation_ready"] is True
+    assert one_minute["short_trigger_ready"] is True

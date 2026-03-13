@@ -169,6 +169,25 @@ def test_mt5_v51_risk_policy_handles_naive_server_time_with_aware_seeded_entries
     assert "deterministic checks" in risk.reason
 
 
+def test_mt5_v51_risk_policy_accepts_broker_symbol_alias() -> None:
+    arbiter = MT5V51RiskArbiter(symbol="BTCUSD")
+    registry = MT5V51TicketRegistry()
+    snapshot = _snapshot(datetime.now(timezone.utc)).model_copy(update={"symbol": "BTCUSD@"})
+    decision = MT5V51EntryDecision(action="enter_long", confidence=0.7, rationale="trend", thesis_tags=["trend"])
+
+    risk = arbiter.evaluate_entry(
+        decision=decision,
+        snapshot=snapshot,
+        registry=registry,
+        risk_posture="neutral",
+        risk_multiplier=1.0,
+        pending_symbol_command=False,
+    )
+
+    assert risk.approved is True
+    assert "deterministic checks" in risk.reason
+
+
 def test_mt5_v51_risk_posture_engine_detects_reduced_state() -> None:
     engine = MT5V51RiskPostureEngine()
     base = datetime(2026, 3, 12, 12, 0, tzinfo=timezone.utc)

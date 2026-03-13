@@ -12,20 +12,24 @@ def build_mt5_v51_ticket_reflection(
     exit_reason: str,
 ) -> TradeReflection:
     avoid_lessons, reinforce_lessons = _ticket_lesson_messages(ticket=ticket, exit_reason=exit_reason)
+    closed_at = ticket.last_seen_at if ticket.last_seen_at >= ticket.opened_at else ticket.opened_at
+    held_seconds = max((closed_at - ticket.opened_at).total_seconds(), 0.0)
+    bars_held = int(held_seconds // 60)
+    realized_r = _sanitized_realized_r(ticket)
     return TradeReflection(
         reflection_id=str(uuid4()),
         symbol=ticket.symbol,
         side=ticket.side,
         opened_at=ticket.opened_at,
-        closed_at=ticket.last_seen_at,
-        bars_held=0,
+        closed_at=closed_at,
+        bars_held=bars_held,
         entry_price=ticket.open_price,
         exit_price=ticket.current_price,
         qty=ticket.current_volume_lots,
         realized_pnl_usd=ticket.unrealized_pnl_usd,
-        realized_r=ticket.unrealized_r,
+        realized_r=realized_r,
         mae_r=0.0,
-        mfe_r=max(ticket.unrealized_r, 0.0),
+        mfe_r=max(realized_r, 0.0),
         exit_reason=exit_reason,
         spread_bps_entry=None,
         spread_bps_exit=None,
@@ -52,6 +56,7 @@ def derive_mt5_v51_lessons(reflection: TradeReflection) -> list[LessonRecord]:
                     "polarity": "avoid",
                     "context_signature": reflection.context_signature,
                     "thesis_tags": reflection.thesis_tags,
+                    "feedback_tags": _feedback_tags_for_message(message, thesis_tags=reflection.thesis_tags),
                 },
             )
         )
@@ -67,6 +72,7 @@ def derive_mt5_v51_lessons(reflection: TradeReflection) -> list[LessonRecord]:
                     "polarity": "reinforce",
                     "context_signature": reflection.context_signature,
                     "thesis_tags": reflection.thesis_tags,
+                    "feedback_tags": _feedback_tags_for_message(message, thesis_tags=reflection.thesis_tags),
                 },
             )
         )
@@ -94,3 +100,35 @@ def _ticket_lesson_messages(ticket: MT5V51TicketRecord, exit_reason: str) -> tup
     if ticket.unrealized_r <= -0.75:
         avoid.append(f"Avoid {direction} BTC entries that move deep against the position before follow-through.")
     return avoid[:3], reinforce[:3]
+
+
+def _sanitized_realized_r(ticket: MT5V51TicketRecord) -> float:
+    if ticket.r_distance_price > 0:
+        if ticket.side == "long":
+            realized_r = float((ticket.current_price - ticket.open_price) / ticket.r_distance_price)
+        else:
+            realized_r = float((ticket.open_price - ticket.current_price) / ticket.r_distance_price)
+    else:
+        realized_r = ticket.unrealized_r
+    if abs(realized_r) > 10:
+        return 0.0
+    return realized_r
+
+
+def _feedback_tags_for_message(message: str, *, thesis_tags: list[str]) -> list[str]:
+    tags = [tag.strip().lower().replace("-", "_").replace(" ", "_") for tag in thesis_tags if tag.strip()]
+    message_lower = message.lower()
+    heuristics = {
+        "invalidat": "respect_invalidation",
+        "losing": "cut_loser_fast",
+        "deep against": "avoid_early_heat",
+        "partial": "partial_then_trail",
+        "breathe": "let_winner_breathe",
+        "does not reverse": "micro_confirm",
+        "follow-through": "wait_for_follow_through",
+        "repeat": "avoid_repeat_context",
+    }
+    for needle, tag in heuristics.items():
+        if needle in message_lower and tag not in tags:
+            tags.append(tag)
+    return tags[:3]

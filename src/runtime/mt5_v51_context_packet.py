@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
+from typing import Any
 
 from data.mt5_v51_schemas import MT5V51Bar, MT5V51BridgeSnapshot, MT5V51TicketRecord
 from data.schemas import LessonRecord, TradeReflection
 from execution.mt5_v51_ticket_registry import MT5V51TicketRegistry
+from runtime.mt5_v51_quote_tape import MT5V51QuoteTape
 
 
 class MT5V51ContextBuilder:
+    def __init__(self, *, quote_tape: MT5V51QuoteTape | None = None) -> None:
+        self._quote_tape = quote_tape or MT5V51QuoteTape()
+
+    def observe_snapshot(self, snapshot: MT5V51BridgeSnapshot) -> None:
+        self._quote_tape.ingest(snapshot)
+
     def build_entry_packet(
         self,
         *,
@@ -17,34 +26,42 @@ class MT5V51ContextBuilder:
         reflections: Sequence[TradeReflection],
         lessons: Sequence[LessonRecord],
     ) -> dict[str, object]:
+        self.observe_snapshot(snapshot)
         twenty = self._timeframe_summary(snapshot.bars_20s, label="20s")
         one = self._timeframe_summary(snapshot.bars_1m, label="1m")
         five = self._timeframe_summary(snapshot.bars_5m, label="5m")
         context_signature = self._context_signature(twenty=twenty, one=one, five=five, spread_bps=snapshot.spread_bps)
+        quote_metrics = self._quote_tape.build_payload(
+            snapshot=snapshot,
+            one_minute_atr_bps=self._optional_float(one.get("atr_14_bps")),
+        )
+        freshness = {
+            "source_snapshot_age_ms": quote_metrics.pop("source_snapshot_age_ms"),
+            "source_snapshot_age_bucket": quote_metrics.pop("source_snapshot_age_bucket"),
+        }
         return {
             "symbol": snapshot.symbol,
             "server_time": snapshot.server_time.isoformat(),
+            "position_state": ("occupied" if registry.has_open_position(snapshot.symbol) else "flat"),
             "quote": {
-                "bid": float(snapshot.bid),
-                "ask": float(snapshot.ask),
-                "spread_bps": snapshot.spread_bps,
+                "bid": self._round(float(snapshot.bid)),
+                "ask": self._round(float(snapshot.ask)),
+                "spread_bps": self._round(snapshot.spread_bps),
             },
-            "symbol_spec": snapshot.symbol_spec.model_dump(mode="json"),
-            "account": {
-                "balance": float(snapshot.account.balance),
-                "equity": float(snapshot.account.equity),
-                "free_margin": float(snapshot.account.free_margin),
-                "account_mode": snapshot.account.account_mode,
-            },
-            "open_exposure": {
-                "has_position": registry.has_open_position(snapshot.symbol),
-                "ticket_count": len(registry.all(snapshot.symbol)),
-                "open_risk_usd": float(registry.total_open_risk_usd(snapshot.symbol)),
-            },
+            "freshness": freshness,
+            "microstructure": quote_metrics,
             "timeframes": {
                 "20s": twenty,
                 "1m": one,
                 "5m": five,
+            },
+            "recent_bars": {
+                "20s": self._recent_bar_window(snapshot.bars_20s, limit=12),
+                "1m": self._recent_bar_window(snapshot.bars_1m, limit=8),
+            },
+            "levels": {
+                "1m": self._swing_distance_payload(snapshot.bars_1m, lookback=20, label="1m"),
+                "5m": self._swing_distance_payload(snapshot.bars_5m, lookback=12, label="5m"),
             },
             "feedback": self._feedback_payload(
                 reflections=reflections,
@@ -65,6 +82,7 @@ class MT5V51ContextBuilder:
         reflections: Sequence[TradeReflection],
         lessons: Sequence[LessonRecord],
     ) -> dict[str, object]:
+        self.observe_snapshot(snapshot)
         tickets = [
             self._ticket_payload(ticket=ticket, allowed_actions=allowed_actions.get(ticket.ticket_id, ["hold"]))
             for ticket in registry.all(snapshot.symbol)
@@ -108,17 +126,6 @@ class MT5V51ContextBuilder:
             and float(five.get("ema_gap_bps", 0.0)) > 0.0
         )
 
-    def preflight_alignment_flipped(self, *, snapshot: MT5V51BridgeSnapshot, action: str) -> bool:
-        twenty = self._timeframe_summary(snapshot.bars_20s, label="20s")
-        one = self._timeframe_summary(snapshot.bars_1m, label="1m")
-        twenty_gap = float(twenty.get("ema_gap_bps", 0.0))
-        one_gap = float(one.get("ema_gap_bps", 0.0))
-        if action == "enter_long":
-            return twenty_gap < 0.0 and one_gap < 0.0
-        if action == "enter_short":
-            return twenty_gap > 0.0 and one_gap > 0.0
-        return False
-
     def _ticket_payload(self, *, ticket: MT5V51TicketRecord, allowed_actions: list[str]) -> dict[str, object]:
         return {
             "ticket_id": ticket.ticket_id,
@@ -146,31 +153,41 @@ class MT5V51ContextBuilder:
         lessons: Sequence[LessonRecord],
         context_signature: str | None = None,
     ) -> dict[str, object]:
-        recent_reflections = list(reflections)[-3:]
+        recent_reflections = list(reflections)[-4:]
+        recent_sources = {reflection.reflection_id for reflection in recent_reflections}
         avoid: list[str] = []
         reinforce: list[str] = []
-        for lesson in reversed(list(lessons)[-10:]):
+        for lesson in reversed(list(lessons)):
+            if recent_sources and lesson.source not in recent_sources:
+                continue
             lesson_signature = str(lesson.metadata.get("context_signature", "")).strip()
             if context_signature is not None:
                 if not lesson_signature or lesson_signature != context_signature:
                     continue
             polarity = str(lesson.metadata.get("polarity", ""))
-            if polarity == "avoid" and lesson.message not in avoid:
-                avoid.append(lesson.message)
-            if polarity == "reinforce" and lesson.message not in reinforce:
-                reinforce.append(lesson.message)
+            lesson_tags = self._lesson_tags(lesson=lesson)
+            if polarity == "avoid":
+                for tag in lesson_tags:
+                    if tag not in avoid:
+                        avoid.append(tag)
+            if polarity == "reinforce":
+                for tag in lesson_tags:
+                    if tag not in reinforce:
+                        reinforce.append(tag)
+            if len(avoid) >= 3 and len(reinforce) >= 3:
+                break
         return {
-            "recent_trades": [
+            "recent_outcomes": [
                 {
                     "side": reflection.side,
-                    "realized_r": reflection.realized_r,
+                    "outcome": self._trade_outcome(reflection),
                     "exit_reason": reflection.exit_reason,
-                    "thesis_tags": reflection.thesis_tags,
+                    "thesis_tags": list(reflection.thesis_tags[:2]),
                 }
                 for reflection in recent_reflections
             ],
-            "avoid": avoid[:2],
-            "reinforce": reinforce[:2],
+            "avoid_tags": avoid[:3],
+            "reinforce_tags": reinforce[:3],
         }
 
     def _timeframe_summary(self, bars: Sequence[MT5V51Bar], *, label: str) -> dict[str, object]:
@@ -229,20 +246,22 @@ class MT5V51ContextBuilder:
         summary = {
             "label": label,
             "samples": len(closed),
-            "latest_close": current,
-            f"return_{return_windows[0]}_bps": self._return_bps(closes, return_windows[0]),
-            f"return_{return_windows[1]}_bps": self._return_bps(closes, return_windows[1]),
-            f"return_{return_windows[2]}_bps": self._return_bps(closes, return_windows[2]),
-            f"ema_{fast_period}": fast_ema,
-            f"ema_{slow_period}": slow_ema,
-            "ema_gap_bps": self._distance_bps(fast_ema, slow_ema),
-            f"atr_{atr_period}_bps": self._price_distance_bps(atr_price, current),
-            f"breakout_distance_{breakout_lookback}_bps": self._breakout_distance(closes, highs, lows, breakout_lookback),
+            "latest_close": self._round(current),
+            f"return_{return_windows[0]}_bps": self._round(self._return_bps(closes, return_windows[0])),
+            f"return_{return_windows[1]}_bps": self._round(self._return_bps(closes, return_windows[1])),
+            f"return_{return_windows[2]}_bps": self._round(self._return_bps(closes, return_windows[2])),
+            f"ema_{fast_period}": self._round(fast_ema),
+            f"ema_{slow_period}": self._round(slow_ema),
+            "ema_gap_bps": self._round(self._distance_bps(fast_ema, slow_ema)),
+            f"atr_{atr_period}_bps": self._round(self._price_distance_bps(atr_price, current)),
+            f"breakout_distance_{breakout_lookback}_bps": self._round(
+                self._breakout_distance(closes, highs, lows, breakout_lookback)
+            ),
             "direction": self._bar_direction(latest),
-            "close_range_position": self._close_range_position(latest),
-            "body_pct": self._body_pct(latest),
-            "latest_range_vs_atr": self._range_vs_atr(latest, atr_price),
-            "tick_volume_ratio": self._tick_volume_ratio(tick_volumes),
+            "close_range_position": self._round(self._close_range_position(latest)),
+            "body_pct": self._round(self._body_pct(latest)),
+            "latest_range_vs_atr": self._round(self._range_vs_atr(latest, atr_price)),
+            "tick_volume_ratio": self._round(self._tick_volume_ratio(tick_volumes)),
             "consecutive_bull_closes": self._consecutive_closes(closes, direction="bull"),
             "consecutive_bear_closes": self._consecutive_closes(closes, direction="bear"),
             "strong_bull_bars_last_3": self._strong_bar_count(closed, atr_price=atr_price, direction="bull", lookback=3),
@@ -250,8 +269,14 @@ class MT5V51ContextBuilder:
             "consecutive_strong_bull_bars": self._consecutive_strong_bars(closed, atr_price=atr_price, direction="bull"),
             "consecutive_strong_bear_bars": self._consecutive_strong_bars(closed, atr_price=atr_price, direction="bear"),
         }
-        summary["long_trigger_ready"] = self._trigger_ready(summary, direction="bull")
-        summary["short_trigger_ready"] = self._trigger_ready(summary, direction="bear")
+        summary["long_continuation_score"] = self._continuation_score(summary, direction="bull")
+        summary["short_continuation_score"] = self._continuation_score(summary, direction="bear")
+        summary["long_pause_after_impulse_ready"] = self._pause_after_impulse_ready(summary, direction="bull")
+        summary["short_pause_after_impulse_ready"] = self._pause_after_impulse_ready(summary, direction="bear")
+        summary["long_continuation_ready"] = self._continuation_ready(summary, direction="bull")
+        summary["short_continuation_ready"] = self._continuation_ready(summary, direction="bear")
+        summary["long_trigger_ready"] = self._trigger_ready(summary, direction="bull") or bool(summary["long_continuation_ready"])
+        summary["short_trigger_ready"] = self._trigger_ready(summary, direction="bear") or bool(summary["short_continuation_ready"])
         return summary
 
     def _trend_summary(
@@ -275,13 +300,52 @@ class MT5V51ContextBuilder:
         return {
             "label": label,
             "samples": len(closed),
-            "latest_close": current,
-            f"return_{return_windows[0]}_bps": self._return_bps(closes, return_windows[0]),
-            f"return_{return_windows[1]}_bps": self._return_bps(closes, return_windows[1]),
-            f"ema_{fast_period}": fast_ema,
-            f"ema_{slow_period}": slow_ema,
-            "ema_gap_bps": self._distance_bps(fast_ema, slow_ema),
-            f"atr_{atr_period}_bps": self._price_distance_bps(atr_price, current),
+            "latest_close": self._round(current),
+            f"return_{return_windows[0]}_bps": self._round(self._return_bps(closes, return_windows[0])),
+            f"return_{return_windows[1]}_bps": self._round(self._return_bps(closes, return_windows[1])),
+            f"ema_{fast_period}": self._round(fast_ema),
+            f"ema_{slow_period}": self._round(slow_ema),
+            "ema_gap_bps": self._round(self._distance_bps(fast_ema, slow_ema)),
+            f"atr_{atr_period}_bps": self._round(self._price_distance_bps(atr_price, current)),
+        }
+
+    def _recent_bar_window(self, bars: Sequence[MT5V51Bar], *, limit: int) -> list[dict[str, object]]:
+        window = [bar for bar in bars if bar.complete][-limit:]
+        return [
+            {
+                "end_at": bar.end_at.isoformat(),
+                "open": self._round(float(bar.open_price)),
+                "high": self._round(float(bar.high_price)),
+                "low": self._round(float(bar.low_price)),
+                "close": self._round(float(bar.close_price)),
+                "tick_volume": int(bar.tick_volume),
+                "spread_bps": self._round(bar.spread_bps),
+            }
+            for bar in window
+        ]
+
+    def _swing_distance_payload(
+        self,
+        bars: Sequence[MT5V51Bar],
+        *,
+        lookback: int,
+        label: str,
+    ) -> dict[str, object]:
+        closed = [bar for bar in bars if bar.complete]
+        if not closed:
+            return {
+                f"distance_to_swing_high_{lookback}_bps": None,
+                f"distance_to_swing_low_{lookback}_bps": None,
+                "label": label,
+            }
+        window = closed[-lookback:]
+        current = float(window[-1].close_price)
+        swing_high = max(float(bar.high_price) for bar in window)
+        swing_low = min(float(bar.low_price) for bar in window)
+        return {
+            "label": label,
+            f"distance_to_swing_high_{lookback}_bps": self._round(self._distance_bps(current, swing_high)),
+            f"distance_to_swing_low_{lookback}_bps": self._round(self._distance_bps(current, swing_low)),
         }
 
     def _context_signature(
@@ -421,12 +485,12 @@ class MT5V51ContextBuilder:
         body_pct = self._body_pct(bar)
         close_range_position = self._close_range_position(bar)
         range_vs_atr = self._range_vs_atr(bar, atr_price)
-        has_expansion = atr_price <= 0 or range_vs_atr >= 0.75
-        if not has_expansion or body_pct < 0.55:
+        has_expansion = atr_price <= 0 or range_vs_atr >= 0.55
+        if not has_expansion or body_pct < 0.45:
             return "flat"
-        if direction == "bull" and close_range_position >= 0.7:
+        if direction == "bull" and close_range_position >= 0.62:
             return "bull"
-        if direction == "bear" and close_range_position <= 0.3:
+        if direction == "bear" and close_range_position <= 0.38:
             return "bear"
         return "flat"
 
@@ -489,3 +553,192 @@ class MT5V51ContextBuilder:
                 and ema_ok
             )
         )
+
+    def _continuation_score(self, summary: dict[str, object], *, direction: str) -> int:
+        summary_direction = str(summary.get("direction", "flat"))
+        if summary_direction != direction:
+            return 0
+        if direction == "bull":
+            consecutive_closes = int(summary.get("consecutive_bull_closes", 0))
+            strong_last_three = int(summary.get("strong_bull_bars_last_3", 0))
+            consecutive_strong = int(summary.get("consecutive_strong_bull_bars", 0))
+            return_1_bps = float(summary.get("return_1_bps", 0.0))
+            return_3_bps = float(summary.get("return_3_bps", 0.0))
+            return_5_bps = float(summary.get("return_5_bps", 0.0))
+            ema_gap_bps = float(summary.get("ema_gap_bps", 0.0))
+            close_range_position = float(summary.get("close_range_position", 0.5))
+        else:
+            consecutive_closes = int(summary.get("consecutive_bear_closes", 0))
+            strong_last_three = int(summary.get("strong_bear_bars_last_3", 0))
+            consecutive_strong = int(summary.get("consecutive_strong_bear_bars", 0))
+            return_1_bps = float(summary.get("return_1_bps", 0.0))
+            return_3_bps = float(summary.get("return_3_bps", 0.0))
+            return_5_bps = float(summary.get("return_5_bps", 0.0))
+            ema_gap_bps = float(summary.get("ema_gap_bps", 0.0))
+            close_range_position = float(summary.get("close_range_position", 0.5))
+
+        body_pct = float(summary.get("body_pct", 0.0))
+        latest_range_vs_atr = float(summary.get("latest_range_vs_atr", 0.0))
+        score = 0
+        if consecutive_closes >= 2:
+            score += 1
+        if consecutive_closes >= 3:
+            score += 2
+        if strong_last_three >= 1:
+            score += 1
+        if consecutive_strong >= 1:
+            score += 1
+        if direction == "bull":
+            if return_1_bps > 0:
+                score += 1
+            if return_3_bps > 0:
+                score += 1
+            if return_5_bps > 0:
+                score += 1
+            if ema_gap_bps > 0:
+                score += 1
+            if close_range_position >= 0.55:
+                score += 1
+        else:
+            if return_1_bps < 0:
+                score += 1
+            if return_3_bps < 0:
+                score += 1
+            if return_5_bps < 0:
+                score += 1
+            if ema_gap_bps < 0:
+                score += 1
+            if close_range_position <= 0.45:
+                score += 1
+        if body_pct >= 0.45:
+            score += 1
+        if latest_range_vs_atr >= 0.25:
+            score += 1
+        return score
+
+    def _continuation_ready(self, summary: dict[str, object], *, direction: str) -> bool:
+        summary_direction = str(summary.get("direction", "flat"))
+        pause_after_impulse_ready = bool(
+            summary.get(f"{'long' if direction == 'bull' else 'short'}_pause_after_impulse_ready", False)
+        )
+        if pause_after_impulse_ready:
+            return True
+        if summary_direction != direction:
+            return False
+        score = int(summary.get(f"{'long' if direction == 'bull' else 'short'}_continuation_score", 0))
+        latest_range_vs_atr = float(summary.get("latest_range_vs_atr", 0.0))
+        body_pct = float(summary.get("body_pct", 0.0))
+        if direction == "bull":
+            consecutive_closes = int(summary.get("consecutive_bull_closes", 0))
+            momentum_ok = float(summary.get("return_3_bps", 0.0)) > 0 and float(summary.get("return_5_bps", 0.0)) > 0
+            ema_ok = float(summary.get("ema_gap_bps", 0.0)) > 0
+            close_ok = float(summary.get("close_range_position", 0.5)) >= 0.55
+        else:
+            consecutive_closes = int(summary.get("consecutive_bear_closes", 0))
+            momentum_ok = float(summary.get("return_3_bps", 0.0)) < 0 and float(summary.get("return_5_bps", 0.0)) < 0
+            ema_ok = float(summary.get("ema_gap_bps", 0.0)) < 0
+            close_ok = float(summary.get("close_range_position", 0.5)) <= 0.45
+        return (
+            consecutive_closes >= 3
+            and momentum_ok
+            and ema_ok
+            and close_ok
+            and body_pct >= 0.40
+            and latest_range_vs_atr >= 0.20
+            and score >= 7
+        )
+
+    def _pause_after_impulse_ready(self, summary: dict[str, object], *, direction: str) -> bool:
+        summary_direction = str(summary.get("direction", "flat"))
+        if summary_direction == direction:
+            return False
+
+        latest_range_vs_atr = float(summary.get("latest_range_vs_atr", 0.0))
+        if latest_range_vs_atr < 0.0 or latest_range_vs_atr > 0.20:
+            return False
+
+        return_1_bps = float(summary.get("return_1_bps", 0.0))
+        if direction == "bull":
+            return (
+                int(summary.get("strong_bull_bars_last_3", 0)) >= 1
+                and float(summary.get("return_3_bps", 0.0)) >= 6.0
+                and float(summary.get("return_5_bps", 0.0)) > 0.0
+                and float(summary.get("ema_gap_bps", 0.0)) >= 2.0
+                and return_1_bps >= -2.5
+            )
+        return (
+            int(summary.get("strong_bear_bars_last_3", 0)) >= 1
+            and float(summary.get("return_3_bps", 0.0)) <= -6.0
+            and float(summary.get("return_5_bps", 0.0)) < 0.0
+            and float(summary.get("ema_gap_bps", 0.0)) <= -2.0
+            and return_1_bps <= 2.5
+        )
+
+    def _trade_outcome(self, reflection: TradeReflection) -> str:
+        realized_r = float(reflection.realized_r)
+        if abs(realized_r) <= 10.0:
+            if realized_r > 0.1:
+                return "win"
+            if realized_r < -0.1:
+                return "loss"
+            return "scratch"
+        realized_pnl = float(reflection.realized_pnl_usd)
+        if realized_pnl > 0:
+            return "win"
+        if realized_pnl < 0:
+            return "loss"
+        return "scratch"
+
+    def _lesson_tags(self, *, lesson: LessonRecord) -> list[str]:
+        tags: list[str] = []
+        metadata_tags = lesson.metadata.get("feedback_tags", [])
+        if isinstance(metadata_tags, list):
+            tags.extend(self._normalize_tag(tag) for tag in metadata_tags if isinstance(tag, str))
+        thesis_tags = lesson.metadata.get("thesis_tags", [])
+        if isinstance(thesis_tags, list):
+            tags.extend(self._normalize_tag(tag) for tag in thesis_tags if isinstance(tag, str))
+        message = lesson.message.lower()
+        heuristics = {
+            "invalidat": "respect_invalidation",
+            "losing": "cut_loser_fast",
+            "deep against": "avoid_early_heat",
+            "partial": "partial_then_trail",
+            "breathe": "let_winner_breathe",
+            "does not reverse": "micro_confirm",
+            "follow-through": "wait_for_follow_through",
+            "repeat": "avoid_repeat_context",
+        }
+        for needle, tag in heuristics.items():
+            if needle in message:
+                tags.append(tag)
+        if not tags:
+            tags.append(self._slugify(lesson.message))
+        unique_tags: list[str] = []
+        for tag in tags:
+            normalized = self._normalize_tag(tag)
+            if not normalized or normalized in unique_tags:
+                continue
+            unique_tags.append(normalized)
+        return unique_tags[:2]
+
+    def _normalize_tag(self, value: str) -> str:
+        normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+        normalized = re.sub(r"[^a-z0-9_]+", "", normalized)
+        normalized = re.sub(r"_+", "_", normalized).strip("_")
+        return normalized[:32]
+
+    def _slugify(self, value: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+        if not normalized:
+            return "feedback_hint"
+        return normalized[:32]
+
+    def _round(self, value: float | None, *, digits: int = 4) -> float | None:
+        if value is None:
+            return None
+        return round(float(value), digits)
+
+    def _optional_float(self, value: Any) -> float | None:
+        if isinstance(value, (int, float)):
+            return float(value)
+        return None
