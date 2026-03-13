@@ -30,7 +30,7 @@ class V51Settings(BaseSettings):
     v51_require_5m_trend_alignment: bool = False
     v51_min_decision_confidence: float = Field(default=0.50, ge=0, le=1)
     v51_min_risk_fraction: float = Field(default=0.001, gt=0, le=1)
-    v51_max_risk_fraction: float = Field(default=0.005, gt=0, le=1)
+    v51_max_risk_fraction: float = Field(default=0.004, gt=0, le=1)
     v51_max_daily_loss_pct: float = Field(default=0.015, gt=0, le=1)
     v51_micro_lookback_bars: int = Field(default=90, ge=30)
     v51_micro_min_warmup_bars: int = Field(default=6, ge=6)

@@ -193,14 +193,21 @@ class MT5V51TicketRegistry:
             return Decimal("0")
         return Decimal("0")
 
+    def scalp_target_r(self, ticket: MT5V51TicketRecord) -> float:
+        if ticket.r_distance_price > 0:
+            target_distance = abs(ticket.hard_take_profit - ticket.open_price)
+            if target_distance > 0:
+                return float(target_distance / ticket.r_distance_price)
+        return float(self._partial_target_r)
+
     def scalp_target_ready(self, ticket: MT5V51TicketRecord) -> bool:
-        return ticket.unrealized_r >= float(self._partial_target_r)
+        return ticket.unrealized_r >= self.scalp_target_r(ticket)
 
     def scalp_partial_ready(self, ticket: MT5V51TicketRecord) -> bool:
         return ticket.partial_stage == 0 and self.scalp_target_ready(ticket)
 
     def scalp_final_ready(self, ticket: MT5V51TicketRecord) -> bool:
-        return ticket.partial_stage >= 1 and ticket.unrealized_r >= float(self._partial_target_r)
+        return ticket.partial_stage >= 1 and ticket.unrealized_r >= self.scalp_target_r(ticket)
 
     def _hydrate_record(self, *, live: MT5V51LiveTicket, snapshot: MT5V51BridgeSnapshot) -> MT5V51TicketRecord:
         matched_pending = None

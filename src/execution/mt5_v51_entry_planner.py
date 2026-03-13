@@ -39,11 +39,13 @@ class MT5V51EntryPlanner:
         snapshot: MT5V51BridgeSnapshot,
         risk_decision: MT5V51RiskDecision,
         ticket_sequence: int = 1,
+        target_r_multiple: Decimal | None = None,
     ) -> MT5V51EntryPlan | None:
         if not risk_decision.approved or risk_decision.risk_fraction is None:
             return None
 
         side = "long" if decision.action == "enter_long" else "short"
+        take_profit_r = target_r_multiple if target_r_multiple is not None else self._partial_target_r
         entry_price = snapshot.ask if side == "long" else snapshot.bid
         bars = list(snapshot.bars_1m)
         if len(bars) < 20:
@@ -83,13 +85,13 @@ class MT5V51EntryPlanner:
         if side == "long":
             stop_loss = self._round_down_to_tick(entry_price - r_distance, snapshot.symbol_spec.tick_size)
             scalp_take_profit = self._round_up_to_tick(
-                entry_price + (r_distance * self._partial_target_r),
+                entry_price + (r_distance * take_profit_r),
                 snapshot.symbol_spec.tick_size,
             )
         else:
             stop_loss = self._round_up_to_tick(entry_price + r_distance, snapshot.symbol_spec.tick_size)
             scalp_take_profit = self._round_down_to_tick(
-                entry_price - (r_distance * self._partial_target_r),
+                entry_price - (r_distance * take_profit_r),
                 snapshot.symbol_spec.tick_size,
             )
         soft_take_profit_1 = scalp_take_profit

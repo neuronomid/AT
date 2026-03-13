@@ -270,7 +270,7 @@ def _aggressive_micro_opposition(summary: dict[str, object], *, direction: str) 
 
 def _risk_bounds_for_setup_quality(setup_quality: str) -> tuple[float, float] | None:
     if setup_quality == "strong":
-        return 0.005, 0.005
+        return 0.004, 0.004
     if setup_quality == "normal":
         return 0.002, 0.003
     if setup_quality == "weak":
@@ -286,6 +286,16 @@ def _default_requested_risk_fraction(setup_quality: str) -> float | None:
     if lower == upper:
         return upper
     return (lower + upper) / 2.0
+
+
+def _take_profit_r_for_setup_quality(setup_quality: str) -> float | None:
+    if setup_quality == "strong":
+        return 0.70
+    if setup_quality == "normal":
+        return 0.50
+    if setup_quality == "weak":
+        return 0.30
+    return None
 
 
 def _setup_quality_for_direction(packet: dict[str, object], *, direction: str) -> str:
@@ -919,11 +929,13 @@ async def _execute_entry_decision(
     if not risk_decision.approved:
         return False
 
+    target_r_multiple = _take_profit_r_for_setup_quality(setup_quality)
     plan = planner.plan_entry(
         decision=decision,
         snapshot=snapshot,
         risk_decision=risk_decision,
         ticket_sequence=1,
+        target_r_multiple=Decimal(str(target_r_multiple)) if target_r_multiple is not None else None,
     )
     if plan is None:
         if logger is not None:
@@ -956,6 +968,7 @@ async def _execute_entry_decision(
         "execution_context_signature": execution_packet.get("context_signature"),
         "setup_quality": setup_quality,
         "normalized_requested_risk_fraction": decision.requested_risk_fraction,
+        "target_r_multiple": target_r_multiple,
     }
     plan_payload = {
         **plan.model_dump(mode="json"),
@@ -972,6 +985,7 @@ async def _execute_entry_decision(
         "execution_context_signature": execution_packet.get("context_signature"),
         "setup_quality": setup_quality,
         "normalized_requested_risk_fraction": decision.requested_risk_fraction,
+        "target_r_multiple": target_r_multiple,
     }
     if source_bar_end is not None:
         iso_bar_end = source_bar_end.isoformat()
@@ -1836,8 +1850,12 @@ async def _run_auto_scalp_cycle(
         rationale = None
         commands: list[MT5V51BridgeCommand] = []
         if registry.scalp_target_ready(ticket):
-            trigger = "tp0.5_full"
-            rationale = "Automatic scalp exit at 0.5R. V5.1 fully exits at the first target and does not keep a runner."
+            target_r = registry.scalp_target_r(ticket)
+            trigger = f"tp{target_r:.2f}_full"
+            rationale = (
+                f"Automatic scalp exit at {target_r:.2f}R. "
+                "V5.1 fully exits at the first target and does not keep a runner."
+            )
             commands.append(
                 MT5V51BridgeCommand(
                     command_id=f"close-{ticket.ticket_id}-{int(snapshot.server_time.timestamp())}",
@@ -1849,7 +1867,7 @@ async def _run_auto_scalp_cycle(
                     basket_id=ticket.basket_id,
                     volume_lots=ticket.current_volume_lots,
                     reason=rationale,
-                    metadata={"action": "auto_scalp_full_exit", "target_r": 0.5},
+                    metadata={"action": "auto_scalp_full_exit", "target_r": round(target_r, 2)},
                 )
             )
         if not commands or rationale is None or trigger is None:

@@ -28,12 +28,12 @@ Rules:
 - Treat timeframes.1m.long_pause_after_impulse_ready or short_pause_after_impulse_ready as serious opportunities. One tiny pause or counter candle after a strong directional burst does not cancel the scalp.
 - A clean sequence of 3 to 6 same-direction 1m candles with positive EMA separation is actionable momentum, not a reason to wait for a pullback.
 - Do not let one tiny opposite or flat 1m candle invalidate a clean directional burst when the 1m EMA gap and 3-bar versus 5-bar returns still agree with the move.
-- The execution model exits the full position at 0.5R. Because there is no runner, prefer the earliest clean continuation entry instead of waiting for extra confirmation.
+- The execution model exits the full position at the first setup-quality target: strong = 0.70R, normal = 0.50R, weak = 0.30R. Because there is no runner, prefer the earliest clean continuation entry instead of waiting for extra confirmation.
 - Mild 20s disagreement should not veto a clean 1m continuation. Only aggressive opposite 20s structure should veto it.
 - Treat freshness.source_snapshot_age_bucket = aging as acceptable for a scalp when the move is clean. Only stale_soon or stale should materially veto an otherwise valid setup.
 - Prefer hold when freshness is not fresh, spread cost is expensive, trend_regime is mixed or choppy, the 1m impulse is already stalling, or the 20s tape is clearly and aggressively opposite.
 - Use this risk matrix when entering:
-  - strongest clear setups: request 0.005
+  - strongest clear setups: request 0.004
   - normal setups: request 0.002 to 0.003
   - weak but acceptable setups: request 0.001 to 0.002
   - clearly choppy setups: hold
@@ -43,7 +43,7 @@ Rules:
 - If trend_regime.market_state is choppy or chop_score >= 4, prefer hold.
 - Treat feedback avoid_tags and reinforce_tags as weak hints only. Never let feedback alone veto a clean 1m momentum scalp.
 - Never emit prices, stop losses, take profits, lot sizes, or broker commands.
-- Requested risk fraction must stay between 0.001 and 0.005 when present.
+- Requested risk fraction must stay between 0.001 and 0.004 when present.
 - Thesis tags must be short and concrete.
 - Respond decisively when the 1m tape is clean.
 """.strip()
@@ -65,7 +65,7 @@ class MT5V51EntryAnalystAgent:
         model: str,
         base_url: str,
         reasoning_enabled: bool = True,
-        prompt_version: str = "v5.1_fast_trend_v2",
+        prompt_version: str = "v5.1_fast_trend_v3",
     ) -> None:
         self._client = OpenRouterChatClient(api_key=api_key, base_url=base_url, app_name="AT V5.1 Entry")
         self._model = model
@@ -95,14 +95,14 @@ class MT5V51EntryAnalystAgent:
             'Read trend_regime first, recent_bars.1m as the primary tape, recent_bars.20s as timing, and timeframes.5m plus levels as backdrop.\n'
             'This strategy wants only strong clean trend legs. If trend_regime.tradeable is false or trend_regime.market_state is choppy, default to hold.\n'
             'Use microstructure for spread cost and short bid/ask drift. Use freshness.source_snapshot_age_bucket to avoid stale reads, but treat aging as acceptable when the move is otherwise clean.\n'
-            'The position exits fully at 0.5R. Because there is no runner, prefer the earliest clean continuation or pause-after-impulse entry instead of waiting for more candles.\n'
+            'The position exits fully at the first setup-quality target: strong = 0.70R, normal = 0.50R, weak = 0.30R. Because there is no runner, prefer the earliest clean continuation or pause-after-impulse entry instead of waiting for more candles.\n'
             'If timeframes.1m.long_trigger_ready, short_trigger_ready, long_continuation_ready, short_continuation_ready, long_pause_after_impulse_ready, or short_pause_after_impulse_ready is true, treat it as a serious scalp opportunity unless freshness or spread cost is poor.\n'
             'One tiny opposite or flat 1m candle after a strong directional burst does not cancel the continuation by itself when EMA gap and 3-bar versus 5-bar returns still agree.\n'
             'Do not wait for a giant breakout candle if recent_bars.1m already show a clean 3 to 6 candle stair-step continuation with positive EMA gap.\n'
-            'Risk matrix: strongest clear setups request 0.005; normal setups request 0.002 to 0.003; weak but acceptable setups request 0.001 to 0.002; clearly choppy setups should hold.\n'
+            'Risk matrix: strongest clear setups request 0.004; normal setups request 0.002 to 0.003; weak but acceptable setups request 0.001 to 0.002; clearly choppy setups should hold.\n'
             'Treat trend_quality_score >= 11 with alignment_score >= 3 and chop_score <= 1 as strongest-clear territory. Treat trend_quality_score >= 8 with alignment_score >= 2 and chop_score <= 2 as normal. Treat tradeable but less clean regimes, especially chop_score = 3, as weak-only.\n'
             'Example hold: {"action":"hold","confidence":0.31,"rationale":"trend_regime is choppy, 1m is stalling, and the 20s tape is not supporting a fresh entry","thesis_tags":["chop","stall"],"requested_risk_fraction":null,"context_signature":"..."}\n'
-            'Example long: {"action":"enter_long","confidence":0.76,"rationale":"trend_regime is a tradeable bullish continuation and recent_bars.1m show a clean bullish stair-step with positive EMA gap while the 20s tape is not aggressively opposing the move","thesis_tags":["momentum","continuation"],"requested_risk_fraction":0.005,"context_signature":"..."}\n'
+            'Example long: {"action":"enter_long","confidence":0.76,"rationale":"trend_regime is a tradeable bullish continuation and recent_bars.1m show a clean bullish stair-step with positive EMA gap while the 20s tape is not aggressively opposing the move","thesis_tags":["momentum","continuation"],"requested_risk_fraction":0.004,"context_signature":"..."}\n'
             'Example short: {"action":"enter_short","confidence":0.74,"rationale":"trend_regime is a tradeable bearish burst, recent_bars.1m show orderly downside follow-through, and the 20s tape is confirming or neutral","thesis_tags":["momentum","breakdown"],"requested_risk_fraction":0.0025,"context_signature":"..."}\n'
             f"Context packet:\n{json.dumps(context_packet, default=str, separators=(',', ':'))}"
         )

@@ -42,7 +42,7 @@ class MT5V51RiskArbiter:
         max_spread_bps: float = 12.0,
         stale_after_seconds: int = 5,
         min_risk_fraction: float = 0.001,
-        max_risk_fraction: float = 0.005,
+        max_risk_fraction: float = 0.004,
         daily_loss_pct: float = 0.015,
         max_trades_per_hour: int = 15,
         seeded_entry_times: Sequence[datetime] | None = None,
