@@ -291,17 +291,19 @@ def _default_requested_risk_fraction(setup_quality: str) -> float | None:
 def _take_profit_r_for_setup_quality(setup_quality: str) -> float | None:
     """Return the *hard* TP R for the MT5 broker-side protection.
 
-    This must be higher than the last tiered TP stage so the broker does not
-    close the position before all partial stages have fired.
-    Stage maxima: strong=0.5R, normal=0.3R, weak=0.15R.
-    We pad generously above because the runtime manages partial closes.
+    The hard TP is the final exit level placed on the broker.  Soft TP
+    stages (partial closes) fire before it:
+        strong: soft 0.3R, soft 0.5R → hard 0.7R
+        normal: soft 0.3R            → hard 0.5R
+        weak:   soft 0.15R           → hard 0.3R
+    All TPs are fixed at entry and never move with SL changes.
     """
     if setup_quality == "strong":
-        return 1.0
+        return 0.7
     if setup_quality == "normal":
-        return 0.75
+        return 0.5
     if setup_quality == "weak":
-        return 0.50
+        return 0.3
     return None
 
 
