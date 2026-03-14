@@ -23,6 +23,27 @@ class MT5V51RegistrySyncResult:
     changed: list[MT5V51TicketRecord] = field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# Setup-quality-aware TP stages configuration.
+# Each stage: (tp_r_threshold, close_fraction, sl_move_fraction_toward_entry)
+#   - tp_r_threshold: the unrealized-R that triggers this stage
+#   - close_fraction: fraction of *original* volume to close
+#   - sl_move_fraction_toward_entry: 0.0 = no move, 0.3 = 30% closer, 1.0 = at entry
+# ---------------------------------------------------------------------------
+_SETUP_TP_STAGES: dict[str, list[tuple[float, float, float]]] = {
+    "strong": [
+        (0.3, 0.25, 0.30),   # TP1: 0.3R → close 25%, SL 30% closer to entry
+        (0.5, 0.50, 1.00),   # TP2: 0.5R → close 50%, SL to entry (breakeven)
+    ],
+    "normal": [
+        (0.3, 0.25, 0.30),   # TP1: 0.3R → close 25%, SL 30% closer to entry
+    ],
+    "weak": [
+        (0.15, 0.25, 0.50),  # TP1: 0.15R → close 25%, SL 50% closer to entry
+    ],
+}
+
+
 class MT5V51TicketRegistry:
     def __init__(
         self,
@@ -38,6 +59,8 @@ class MT5V51TicketRegistry:
         self._post_partial_stop_lock_r = post_partial_stop_lock_r
         self._records: dict[str, MT5V51TicketRecord] = {}
         self._pending_entries: dict[str, dict[str, Any]] = {}
+        # Track the highest SL we have set per ticket so SL never moves backward
+        self._best_stop_loss: dict[str, Decimal] = {}
 
     def seed(self, tickets: list[MT5V51TicketRecord]) -> None:
         self._records = {ticket.ticket_id: ticket for ticket in tickets if ticket.is_open}
@@ -184,32 +207,122 @@ class MT5V51TicketRegistry:
         return {ticket.ticket_id: ticket.quarter_r_bucket() for ticket in self.all(symbol)}
 
     def stop_target_for_action(self, *, ticket: MT5V51TicketRecord, snapshot: MT5V51BridgeSnapshot) -> Decimal | None:
-        if self.scalp_partial_ready(ticket):
-            return self._lock_price(ticket, self._post_partial_stop_lock_r)
+        """Return the best-known SL for this ticket, or None if no action needed."""
+        best = self._best_stop_loss.get(ticket.ticket_id)
+        if best is not None:
+            return best
         return None
 
-    def partial_close_fraction(self, ticket: MT5V51TicketRecord) -> Decimal:
-        if ticket.partial_stage == 0:
-            return Decimal("1.00")
-        if ticket.partial_stage == 1:
-            return Decimal("0")
-        return Decimal("0")
+    def setup_quality(self, ticket: MT5V51TicketRecord) -> str:
+        """Retrieve the setup quality stored in the ticket metadata."""
+        return str(ticket.metadata.get("setup_quality", "normal"))
 
-    def scalp_target_r(self, ticket: MT5V51TicketRecord) -> float:
-        if ticket.r_distance_price > 0:
-            target_distance = abs(ticket.hard_take_profit - ticket.open_price)
-            if target_distance > 0:
-                return float(target_distance / ticket.r_distance_price)
-        return float(self._partial_target_r)
+    def tp_stages(self, ticket: MT5V51TicketRecord) -> list[tuple[float, float, float]]:
+        """Return the TP stage definitions for this ticket's setup quality."""
+        quality = self.setup_quality(ticket)
+        return list(_SETUP_TP_STAGES.get(quality, _SETUP_TP_STAGES["normal"]))
+
+    def next_tp_stage(self, ticket: MT5V51TicketRecord) -> tuple[float, float, float] | None:
+        """Return the next unfired TP stage for this ticket, or None if all stages are complete."""
+        stages = self.tp_stages(ticket)
+        stage_index = ticket.partial_stage
+        if stage_index >= len(stages):
+            return None
+        return stages[stage_index]
 
     def scalp_target_ready(self, ticket: MT5V51TicketRecord) -> bool:
-        return ticket.unrealized_r >= self.scalp_target_r(ticket)
+        """True if the ticket's unrealized_r has reached the next TP stage threshold."""
+        stage = self.next_tp_stage(ticket)
+        if stage is None:
+            return False
+        tp_r_threshold, _, _ = stage
+        return ticket.unrealized_r >= tp_r_threshold
 
     def scalp_partial_ready(self, ticket: MT5V51TicketRecord) -> bool:
-        return ticket.partial_stage == 0 and self.scalp_target_ready(ticket)
+        return self.scalp_target_ready(ticket)
 
     def scalp_final_ready(self, ticket: MT5V51TicketRecord) -> bool:
-        return ticket.partial_stage >= 1 and ticket.unrealized_r >= self.scalp_target_r(ticket)
+        """No more TP stages remain."""
+        stages = self.tp_stages(ticket)
+        return ticket.partial_stage >= len(stages)
+
+    def partial_close_fraction(self, ticket: MT5V51TicketRecord) -> Decimal:
+        """Fraction of original volume to close at the current stage."""
+        stage = self.next_tp_stage(ticket)
+        if stage is None:
+            return Decimal("0")
+        _, close_frac, _ = stage
+        return Decimal(str(close_frac))
+
+    def compute_new_stop_loss(
+        self,
+        ticket: MT5V51TicketRecord,
+    ) -> Decimal | None:
+        """Compute the new SL after the current TP stage fires.
+        
+        SL can only move closer to entry, never back away.
+        Returns None if no SL change is needed.
+        """
+        stage = self.next_tp_stage(ticket)
+        if stage is None:
+            return None
+        _, _, sl_move_fraction = stage
+        if sl_move_fraction <= 0:
+            return None
+
+        entry_price = ticket.open_price
+        initial_sl = ticket.initial_stop_loss
+        sl_distance = abs(entry_price - initial_sl)
+
+        if sl_move_fraction >= 1.0:
+            # Move SL all the way to entry (breakeven)
+            new_sl = entry_price
+        else:
+            # Move SL a fraction closer to entry
+            move_amount = sl_distance * Decimal(str(sl_move_fraction))
+            if ticket.side == "long":
+                new_sl = initial_sl + move_amount
+            else:
+                new_sl = initial_sl - move_amount
+
+        # Enforce monotonic tightening: SL can only get closer to entry
+        current_best = self._best_stop_loss.get(ticket.ticket_id)
+        if current_best is not None:
+            if ticket.side == "long":
+                new_sl = max(new_sl, current_best)
+            else:
+                new_sl = min(new_sl, current_best)
+
+        # Also ensure the new SL is at least as favorable as the current broker SL
+        if ticket.stop_loss is not None:
+            if ticket.side == "long":
+                new_sl = max(new_sl, ticket.stop_loss)
+            else:
+                new_sl = min(new_sl, ticket.stop_loss)
+
+        return new_sl
+
+    def record_tp_stage_fired(self, ticket: MT5V51TicketRecord, new_sl: Decimal | None) -> None:
+        """Record that a TP stage has fired: advance the stage counter and lock the SL."""
+        new_stage = ticket.partial_stage + 1
+        ticket_update = {"partial_stage": new_stage}
+        updated = ticket.model_copy(update=ticket_update)
+        self._records[ticket.ticket_id] = updated
+
+        if new_sl is not None:
+            self._best_stop_loss[ticket.ticket_id] = new_sl
+
+        if self._store is not None:
+            self._store.upsert_mt5_v51_ticket_state(updated)
+
+    def scalp_target_r(self, ticket: MT5V51TicketRecord) -> float:
+        """Return the R threshold for the next TP stage."""
+        stage = self.next_tp_stage(ticket)
+        if stage is not None:
+            tp_r_threshold, _, _ = stage
+            return tp_r_threshold
+        # All stages complete; return a large number so scalp_target_ready returns False
+        return 999.0
 
     def _hydrate_record(self, *, live: MT5V51LiveTicket, snapshot: MT5V51BridgeSnapshot) -> MT5V51TicketRecord:
         matched_pending = None
@@ -381,7 +494,10 @@ class MT5V51TicketRegistry:
         if original_volume <= 0:
             return 0
         closed_fraction = 1 - float(current_volume / original_volume)
-        if closed_fraction >= 0.45:
+        # Rough inference from volume: each ~25% closed = 1 stage
+        if closed_fraction >= 0.65:
+            return 2
+        if closed_fraction >= 0.20:
             return 1
         return 0
 

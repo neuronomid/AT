@@ -200,7 +200,7 @@ class MT5V51TicketRecord(BaseModel):
     soft_take_profit_2: Decimal = Field(gt=0)
     r_distance_price: Decimal = Field(gt=0)
     risk_amount_usd: Decimal = Field(ge=0)
-    partial_stage: int = Field(default=0, ge=0, le=2)
+    partial_stage: int = Field(default=0, ge=0, le=5)
     highest_favorable_close: Decimal
     lowest_favorable_close: Decimal
     thesis_tags: list[str] = Field(default_factory=list)

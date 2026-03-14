@@ -23,8 +23,8 @@ class MT5V51ContextBuilder:
         snapshot: MT5V51BridgeSnapshot,
         registry: MT5V51TicketRegistry,
         risk_posture: str,
-        reflections: Sequence[TradeReflection],
-        lessons: Sequence[LessonRecord],
+        reflections: Sequence[TradeReflection] | None = None,
+        lessons: Sequence[LessonRecord] | None = None,
     ) -> dict[str, object]:
         self.observe_snapshot(snapshot)
         twenty = self._timeframe_summary(snapshot.bars_20s, label="20s")
@@ -63,11 +63,6 @@ class MT5V51ContextBuilder:
                 "1m": self._swing_distance_payload(snapshot.bars_1m, lookback=20, label="1m"),
                 "5m": self._swing_distance_payload(snapshot.bars_5m, lookback=12, label="5m"),
             },
-            "feedback": self._feedback_payload(
-                reflections=reflections,
-                lessons=lessons,
-                context_signature=context_signature,
-            ),
             "trend_regime": self._trend_regime_payload(twenty=twenty, one=one, five=five),
             "risk_posture": risk_posture,
             "context_signature": context_signature,

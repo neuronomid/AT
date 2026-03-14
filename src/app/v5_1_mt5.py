@@ -289,12 +289,19 @@ def _default_requested_risk_fraction(setup_quality: str) -> float | None:
 
 
 def _take_profit_r_for_setup_quality(setup_quality: str) -> float | None:
+    """Return the *hard* TP R for the MT5 broker-side protection.
+
+    This must be higher than the last tiered TP stage so the broker does not
+    close the position before all partial stages have fired.
+    Stage maxima: strong=0.5R, normal=0.3R, weak=0.15R.
+    We pad generously above because the runtime manages partial closes.
+    """
     if setup_quality == "strong":
-        return 0.75
+        return 1.0
     if setup_quality == "normal":
-        return 0.50
+        return 0.75
     if setup_quality == "weak":
-        return 0.25
+        return 0.50
     return None
 
 
@@ -813,8 +820,6 @@ async def _execute_entry_decision(
         snapshot=snapshot,
         registry=registry,
         risk_posture=risk_posture,
-        reflections=list(reflections),
-        lessons=list(lessons),
     )
     decision, setup_quality = _normalize_requested_risk_fraction(decision, packet=execution_packet)
     execution_packet = {
@@ -1081,8 +1086,6 @@ async def _run_fast_entry_cycle(
         snapshot=snapshot,
         registry=registry,
         risk_posture=risk_posture,
-        reflections=list(reflections),
-        lessons=list(lessons),
     )
     decision = _fast_quote_entry_decision(packet)
     if decision is None:
@@ -1547,8 +1550,6 @@ def _launch_entry_analysis(
         snapshot=snapshot,
         registry=registry,
         risk_posture=risk_posture,
-        reflections=list(reflections),
-        lessons=list(lessons),
     )
     analysis_budget_seconds = _entry_analysis_budget_seconds(
         timeout_seconds=settings.v51_mt5_entry_timeout_seconds,
@@ -1840,6 +1841,14 @@ async def _run_auto_scalp_cycle(
     shadow_mode: bool,
     logger,
 ) -> None:
+    """Tiered partial-close cycle.
+
+    For each open ticket:
+      1. Check if the next TP stage threshold (unrealized_r) has been reached.
+      2. If yes, issue a partial-close command for the stage's close fraction.
+      3. Issue an SL modification to tighten the stop (never moves backwards).
+      4. Advance the partial_stage counter on the ticket.
+    """
     tickets = registry.all(snapshot.symbol)
     if not tickets:
         return
@@ -1861,38 +1870,98 @@ async def _run_auto_scalp_cycle(
             continue
         if min_hold_bars > 0 and _held_closed_1m_bars(ticket=ticket, snapshot=snapshot) < max(min_hold_bars - 1, 0):
             continue
-        trigger = None
-        rationale = None
+
+        # Determine the current TP stage details
+        stage_info = registry.next_tp_stage(ticket)
+        if stage_info is None:
+            continue
+        tp_r_threshold, close_fraction, sl_move_fraction = stage_info
+        setup_quality = registry.setup_quality(ticket)
+        stage_index = ticket.partial_stage
+
+        # Compute the partial close volume
+        close_volume = planner.partial_close_volume(
+            original_volume_lots=ticket.original_volume_lots,
+            close_fraction=Decimal(str(close_fraction)),
+            snapshot=snapshot,
+        )
+
+        # Compute the new stop-loss level (monotonic tightening)
+        new_sl = registry.compute_new_stop_loss(ticket)
+
+        trigger = f"tp_stage{stage_index + 1}_{setup_quality}_{tp_r_threshold:.2f}R"
+        rationale = (
+            f"Tiered scalp stage {stage_index + 1} ({setup_quality} setup): "
+            f"TP at {tp_r_threshold:.2f}R reached → "
+            f"close {close_fraction * 100:.0f}% of original volume"
+        )
+        if new_sl is not None:
+            if sl_move_fraction >= 1.0:
+                rationale += f", SL moved to entry (breakeven at {new_sl})"
+            else:
+                rationale += f", SL moved {sl_move_fraction * 100:.0f}% closer to entry (new SL: {new_sl})"
+
         commands: list[MT5V51BridgeCommand] = []
-        if registry.scalp_target_ready(ticket):
-            target_r = registry.scalp_target_r(ticket)
-            trigger = f"tp{target_r:.2f}_full"
-            rationale = (
-                f"Automatic scalp exit at {target_r:.2f}R. "
-                "V5.1 fully exits at the first target and does not keep a runner."
-            )
+
+        # Command 1: Partial close
+        if close_volume is not None and close_volume > 0:
             commands.append(
                 MT5V51BridgeCommand(
-                    command_id=f"close-{ticket.ticket_id}-{int(snapshot.server_time.timestamp())}",
+                    command_id=f"partial-{ticket.ticket_id}-s{stage_index + 1}-{int(snapshot.server_time.timestamp())}",
                     command_type="close_ticket",
                     symbol=ticket.symbol,
                     created_at=snapshot.server_time,
                     expires_at=snapshot.server_time + timedelta(seconds=60),
                     ticket_id=ticket.ticket_id,
                     basket_id=ticket.basket_id,
-                    volume_lots=ticket.current_volume_lots,
+                    volume_lots=close_volume,
                     reason=rationale,
-                    metadata={"action": "auto_scalp_full_exit", "target_r": round(target_r, 2)},
+                    metadata={
+                        "action": "tiered_partial_close",
+                        "stage": stage_index + 1,
+                        "setup_quality": setup_quality,
+                        "target_r": round(tp_r_threshold, 2),
+                        "close_fraction": round(close_fraction, 2),
+                        "sl_move_fraction": round(sl_move_fraction, 2),
+                    },
                 )
             )
-        if not commands or rationale is None or trigger is None:
+
+        # Command 2: SL modification (if SL needs to move)
+        if new_sl is not None:
+            commands.append(
+                MT5V51BridgeCommand(
+                    command_id=f"sl-trail-{ticket.ticket_id}-s{stage_index + 1}-{int(snapshot.server_time.timestamp())}",
+                    command_type="modify_ticket",
+                    symbol=ticket.symbol,
+                    created_at=snapshot.server_time,
+                    expires_at=snapshot.server_time + timedelta(seconds=60),
+                    ticket_id=ticket.ticket_id,
+                    basket_id=ticket.basket_id,
+                    stop_loss=new_sl,
+                    take_profit=ticket.take_profit,
+                    reason=f"SL tightened after TP stage {stage_index + 1}: {ticket.initial_stop_loss} → {new_sl}",
+                    metadata={
+                        "action": "tiered_sl_trail",
+                        "stage": stage_index + 1,
+                        "setup_quality": setup_quality,
+                        "old_sl": str(ticket.stop_loss),
+                        "new_sl": str(new_sl),
+                        "sl_move_fraction": round(sl_move_fraction, 2),
+                    },
+                )
+            )
+
+        if not commands:
             continue
 
         decision = {
             "ticket_id": ticket.ticket_id,
-            "action": "close_ticket",
+            "action": "tiered_partial_close",
             "confidence": 1.0,
             "rationale": rationale,
+            "stage": stage_index + 1,
+            "setup_quality": setup_quality,
         }
         event_journal.record(
             {
@@ -1901,7 +1970,7 @@ async def _run_auto_scalp_cycle(
                 "decision": decision,
                 "allowed_actions": ["close_ticket"],
                 "risk_approved": True,
-                "risk_reason": "Deterministic scalp management trigger fired.",
+                "risk_reason": "Deterministic tiered scalp management trigger fired.",
                 "decision_stage": "auto_scalp",
                 "decision_trigger": trigger,
             }
@@ -1914,12 +1983,12 @@ async def _run_auto_scalp_cycle(
                 agent_name=agent_name,
                 decision_kind="management",
                 symbol=snapshot.symbol,
-                action="close_ticket",
+                action="tiered_partial_close",
                 confidence=1.0,
                 rationale=rationale,
                 risk_posture=risk_posture,
                 risk_approved=True,
-                risk_reason="Deterministic scalp management trigger fired.",
+                risk_reason="Deterministic tiered scalp management trigger fired.",
                 context_payload=context_packet,
                 decision_payload={
                     "stage": "auto_scalp",
@@ -1928,6 +1997,11 @@ async def _run_auto_scalp_cycle(
                     "commands": [command.model_dump(mode="json") for command in commands],
                 },
             )
+
+        # Record the stage advancement *before* sending commands so that
+        # even if queuing fails, the stage is advanced and SL is locked.
+        registry.record_tp_stage_fired(ticket, new_sl)
+
         if shadow_mode:
             for command in commands:
                 event_journal.record(
