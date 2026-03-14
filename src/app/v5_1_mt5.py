@@ -270,9 +270,9 @@ def _aggressive_micro_opposition(summary: dict[str, object], *, direction: str) 
 
 def _risk_bounds_for_setup_quality(setup_quality: str) -> tuple[float, float] | None:
     if setup_quality == "strong":
-        return 0.004, 0.004
+        return 0.005, 0.005
     if setup_quality == "normal":
-        return 0.002, 0.003
+        return 0.003, 0.004
     if setup_quality == "weak":
         return 0.001, 0.002
     return None
@@ -290,11 +290,11 @@ def _default_requested_risk_fraction(setup_quality: str) -> float | None:
 
 def _take_profit_r_for_setup_quality(setup_quality: str) -> float | None:
     if setup_quality == "strong":
-        return 0.70
+        return 0.75
     if setup_quality == "normal":
         return 0.50
     if setup_quality == "weak":
-        return 0.30
+        return 0.25
     return None
 
 
@@ -1758,13 +1758,22 @@ async def _run_entry_protection_cycle(
         return False
 
     for ticket in tickets:
+        planned_stop = ticket.initial_stop_loss
+        planned_take_profit = ticket.hard_take_profit
+        missing_protection = ticket.stop_loss is None or ticket.take_profit is None
+        restore_legacy_drift = bool(ticket.metadata.get("attach_protection_after_fill")) and (
+            not _levels_match(ticket.stop_loss, planned_stop, tick_size=snapshot.symbol_spec.tick_size)
+            or not _levels_match(ticket.take_profit, planned_take_profit, tick_size=snapshot.symbol_spec.tick_size)
+        )
+        if not missing_protection and not restore_legacy_drift:
+            continue
         command = planner.build_protection_command(
             ticket=ticket,
             snapshot=snapshot,
             reason=(
-                "Restore broker-safe protection on a reduced ticket."
-                if ticket.partial_stage >= 1
-                else "Attach the broker-safe stop and target after entry fill."
+                "Restore the original fixed entry protection from legacy attach metadata."
+                if restore_legacy_drift
+                else "Attach the original fixed stop and target after entry fill."
             ),
             created_at=snapshot.server_time,
             expires_at=snapshot.server_time + timedelta(seconds=60),

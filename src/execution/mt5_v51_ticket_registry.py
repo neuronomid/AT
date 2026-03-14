@@ -456,55 +456,20 @@ class MT5V51TicketRegistry:
         if fill_price is None:
             return normalized
 
-        side = str(normalized.get("side", "long"))
-        original_entry_price = Decimal(str(normalized.get("entry_price", fill_price)))
-        r_distance = Decimal(str(normalized.get("r_distance_price", "0")))
-        if r_distance <= 0:
-            stop_loss = normalized.get("stop_loss")
-            if stop_loss is not None:
-                r_distance = abs(fill_price - Decimal(str(stop_loss)))
+        stop_loss = normalized.get("stop_loss", normalized.get("initial_stop_loss"))
+        if stop_loss is None and isinstance(normalized.get("metadata"), dict):
+            stop_loss = normalized["metadata"].get("initial_stop_loss", normalized["metadata"].get("stop_loss"))
+        if stop_loss is not None:
+            r_distance = abs(fill_price - Decimal(str(stop_loss)))
+        else:
+            r_distance = Decimal(str(normalized.get("r_distance_price", "0")))
         if r_distance <= 0:
             return normalized
-
-        hard_target_r = self._target_multiple(
-            target_price=normalized.get("hard_take_profit", normalized.get("take_profit")),
-            entry_price=original_entry_price,
-            r_distance=r_distance,
-            fallback=self._partial_target_r,
-        )
-        soft_target_r_1 = self._target_multiple(
-            target_price=normalized.get("soft_take_profit_1"),
-            entry_price=original_entry_price,
-            r_distance=r_distance,
-            fallback=hard_target_r,
-        )
-        soft_target_r_2 = self._target_multiple(
-            target_price=normalized.get("soft_take_profit_2"),
-            entry_price=original_entry_price,
-            r_distance=r_distance,
-            fallback=hard_target_r,
-        )
-
-        if side == "long":
-            stop_loss = fill_price - r_distance
-            hard_take_profit = fill_price + (r_distance * hard_target_r)
-            soft_take_profit_1 = fill_price + (r_distance * soft_target_r_1)
-            soft_take_profit_2 = fill_price + (r_distance * soft_target_r_2)
-        else:
-            stop_loss = fill_price + r_distance
-            hard_take_profit = fill_price - (r_distance * hard_target_r)
-            soft_take_profit_1 = fill_price - (r_distance * soft_target_r_1)
-            soft_take_profit_2 = fill_price - (r_distance * soft_target_r_2)
 
         normalized.update(
             {
                 "entry_price": fill_price,
                 "acked_fill_price": fill_price,
-                "stop_loss": stop_loss,
-                "take_profit": hard_take_profit,
-                "hard_take_profit": hard_take_profit,
-                "soft_take_profit_1": soft_take_profit_1,
-                "soft_take_profit_2": soft_take_profit_2,
                 "r_distance_price": r_distance,
                 "normalized_after_fill": True,
             }
@@ -512,32 +477,24 @@ class MT5V51TicketRegistry:
         metadata = dict(normalized.get("metadata", {})) if isinstance(normalized.get("metadata"), dict) else {}
         metadata.update(
             {
-                "entry_price": fill_price,
-                "initial_stop_loss": stop_loss,
-                "hard_take_profit": hard_take_profit,
-                "soft_take_profit_1": soft_take_profit_1,
-                "soft_take_profit_2": soft_take_profit_2,
-                "r_distance_price": r_distance,
+                "entry_price": float(fill_price),
+                "r_distance_price": float(r_distance),
                 "normalized_after_fill": True,
             }
         )
+        if stop_loss is not None:
+            metadata.setdefault("initial_stop_loss", float(Decimal(str(stop_loss))))
+        hard_take_profit = normalized.get("hard_take_profit", normalized.get("take_profit"))
+        if hard_take_profit is not None:
+            metadata.setdefault("hard_take_profit", float(Decimal(str(hard_take_profit))))
+        soft_take_profit_1 = normalized.get("soft_take_profit_1")
+        if soft_take_profit_1 is not None:
+            metadata.setdefault("soft_take_profit_1", float(Decimal(str(soft_take_profit_1))))
+        soft_take_profit_2 = normalized.get("soft_take_profit_2")
+        if soft_take_profit_2 is not None:
+            metadata.setdefault("soft_take_profit_2", float(Decimal(str(soft_take_profit_2))))
         normalized["metadata"] = metadata
         return normalized
-
-    def _target_multiple(
-        self,
-        *,
-        target_price: Any,
-        entry_price: Decimal,
-        r_distance: Decimal,
-        fallback: Decimal,
-    ) -> Decimal:
-        if target_price is None or r_distance <= 0:
-            return fallback
-        distance = abs(Decimal(str(target_price)) - entry_price)
-        if distance <= 0:
-            return fallback
-        return distance / r_distance
 
     def _has_live_ticket_id(self, ticket_id: str | None) -> bool:
         if ticket_id is None:

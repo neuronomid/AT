@@ -256,3 +256,28 @@ def test_mt5_v51_risk_policy_clamps_requested_risk_to_absolute_bounds() -> None:
     assert high_risk.approved is True
     assert low_risk.risk_fraction == 0.001
     assert high_risk.risk_fraction == 0.005
+
+
+def test_mt5_v51_risk_policy_does_not_reduce_requested_setup_size_below_range() -> None:
+    arbiter = MT5V51RiskArbiter(symbol="BTCUSD", min_risk_fraction=0.001, max_risk_fraction=0.005)
+    registry = MT5V51TicketRegistry()
+    snapshot = _snapshot(datetime.now(timezone.utc))
+    decision = MT5V51EntryDecision(
+        action="enter_long",
+        confidence=0.7,
+        rationale="trend",
+        thesis_tags=["trend"],
+        requested_risk_fraction=0.005,
+    )
+
+    risk = arbiter.evaluate_entry(
+        decision=decision,
+        snapshot=snapshot,
+        registry=registry,
+        risk_posture="reduced",
+        risk_multiplier=0.75,
+        pending_symbol_command=False,
+    )
+
+    assert risk.approved is True
+    assert risk.risk_fraction == 0.005

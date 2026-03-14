@@ -82,7 +82,7 @@ def _bar(
 def test_mt5_v51_entry_planner_builds_long_and_short_plans() -> None:
     planner = MT5V51EntryPlanner()
     snapshot = _snapshot()
-    risk_decision = MT5V51RiskDecision(approved=True, reason="ok", risk_fraction=0.004, risk_posture="neutral")
+    risk_decision = MT5V51RiskDecision(approved=True, reason="ok", risk_fraction=0.005, risk_posture="neutral")
 
     long_plan = planner.plan_entry(
         decision=MT5V51EntryDecision(action="enter_long", confidence=0.7, rationale="trend", thesis_tags=["trend"]),
@@ -108,7 +108,7 @@ def test_mt5_v51_entry_planner_builds_long_and_short_plans() -> None:
     assert long_target_distance <= (long_plan.entry_price - long_plan.stop_loss) * Decimal("0.5") + snapshot.symbol_spec.tick_size
     assert short_target_distance <= (short_plan.stop_loss - short_plan.entry_price) * Decimal("0.5") + snapshot.symbol_spec.tick_size
     assert long_plan.entry_price - long_plan.stop_loss >= Decimal("6")
-    assert short_plan.stop_loss - short_plan.entry_price >= Decimal("12")
+    assert short_plan.stop_loss > short_plan.entry_price
     assert long_plan.volume_lots >= snapshot.symbol_spec.volume_min
     assert long_plan.stop_loss % snapshot.symbol_spec.tick_size == 0
 
@@ -125,7 +125,7 @@ def test_mt5_v51_entry_planner_builds_long_and_short_plans() -> None:
     assert long_command.stop_loss == long_plan.stop_loss
     assert long_command.take_profit == long_plan.take_profit
     assert long_command.metadata["initial_stop_loss"] == float(long_plan.stop_loss)
-    assert long_command.metadata["attach_protection_after_fill"] is True
+    assert long_command.metadata["attach_protection_after_fill"] is False
 
     ticket = MT5V51TicketRecord(
         ticket_id="1001",
@@ -277,6 +277,74 @@ def test_mt5_v51_entry_planner_uses_previous_lower_shadow_when_current_is_not_lo
     assert plan.stop_loss == Decimal("99.90")
 
 
+def test_mt5_v51_entry_planner_uses_nearest_prior_longer_shadow_when_entry_shadow_is_larger() -> None:
+    planner = MT5V51EntryPlanner(broker_stop_buffer_ticks=Decimal("0"))
+    base_snapshot = _snapshot().model_copy(
+        update={
+            "bid": Decimal("100.00"),
+            "ask": Decimal("100.01"),
+            "symbol_spec": MT5V51SymbolSpec(
+                digits=2,
+                point=Decimal("0.01"),
+                tick_size=Decimal("0.01"),
+                tick_value=Decimal("1.00"),
+                volume_min=Decimal("0.01"),
+                volume_step=Decimal("0.01"),
+                volume_max=Decimal("5.00"),
+                stops_level_points=0,
+            ),
+            "bars_1m": [
+                _bar(
+                    end_at=datetime(2026, 3, 12, 11, 31, tzinfo=timezone.utc) + timedelta(minutes=index),
+                    open_price=Decimal("100.00"),
+                    high_price=Decimal("100.04"),
+                    low_price=Decimal("99.96"),
+                    close_price=Decimal("100.00"),
+                    tick_volume=100 + index,
+                )
+                for index in range(30)
+            ],
+        }
+    )
+    bars = list(base_snapshot.bars_1m)
+    bars[-3] = _bar(
+        end_at=bars[-3].end_at,
+        open_price=Decimal("100.01"),
+        high_price=Decimal("100.04"),
+        low_price=Decimal("99.85"),
+        close_price=Decimal("100.02"),
+        tick_volume=127,
+    )
+    bars[-2] = _bar(
+        end_at=bars[-2].end_at,
+        open_price=Decimal("100.00"),
+        high_price=Decimal("100.03"),
+        low_price=Decimal("99.91"),
+        close_price=Decimal("100.01"),
+        tick_volume=128,
+    )
+    bars[-1] = _bar(
+        end_at=bars[-1].end_at,
+        open_price=Decimal("100.00"),
+        high_price=Decimal("100.03"),
+        low_price=Decimal("99.88"),
+        close_price=Decimal("100.01"),
+        tick_volume=129,
+    )
+    snapshot = base_snapshot.model_copy(update={"bars_1m": bars})
+    risk_decision = MT5V51RiskDecision(approved=True, reason="ok", risk_fraction=0.003, risk_posture="neutral")
+
+    plan = planner.plan_entry(
+        decision=MT5V51EntryDecision(action="enter_long", confidence=0.7, rationale="shadow test", thesis_tags=["shadow"]),
+        snapshot=snapshot,
+        risk_decision=risk_decision,
+        ticket_sequence=1,
+    )
+
+    assert plan is not None
+    assert plan.stop_loss == Decimal("99.85")
+
+
 def test_mt5_v51_entry_planner_uses_current_upper_shadow_and_ask_buffer_for_short_stops() -> None:
     planner = MT5V51EntryPlanner(broker_stop_buffer_ticks=Decimal("0"))
     base_snapshot = _snapshot().model_copy(
@@ -334,4 +402,4 @@ def test_mt5_v51_entry_planner_uses_current_upper_shadow_and_ask_buffer_for_shor
     )
 
     assert plan is not None
-    assert plan.stop_loss == Decimal("100.06")
+    assert plan.stop_loss == Decimal("100.12")

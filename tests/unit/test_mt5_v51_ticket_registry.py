@@ -189,7 +189,7 @@ def test_mt5_v51_ticket_registry_keeps_entry_unprotected_when_fill_ack_has_no_sl
     assert ticket.hard_take_profit == Decimal("60140")
 
 
-def test_mt5_v51_ticket_registry_normalizes_targets_from_fill_price() -> None:
+def test_mt5_v51_ticket_registry_preserves_fixed_targets_after_fill() -> None:
     registry = MT5V51TicketRegistry()
     command = MT5V51BridgeCommand(
         command_id="cmd-2b",
@@ -242,10 +242,11 @@ def test_mt5_v51_ticket_registry_normalizes_targets_from_fill_price() -> None:
 
     assert ticket is not None
     assert ticket.open_price == Decimal("60108")
-    assert ticket.initial_stop_loss == Decimal("60088")
-    assert ticket.hard_take_profit == Decimal("60148")
-    assert ticket.soft_take_profit_1 == Decimal("60118")
-    assert ticket.soft_take_profit_2 == Decimal("60128")
+    assert ticket.initial_stop_loss == Decimal("60080")
+    assert ticket.hard_take_profit == Decimal("60140")
+    assert ticket.soft_take_profit_1 == Decimal("60110")
+    assert ticket.soft_take_profit_2 == Decimal("60120")
+    assert ticket.r_distance_price == Decimal("28")
 
 
 def test_mt5_v51_ticket_registry_matches_symbol_alias_and_uses_sane_fallback_r_distance() -> None:
@@ -362,5 +363,5 @@ def test_mt5_v51_ticket_registry_waits_for_real_live_ticket_after_placeholder_ac
     assert len(sync_result.opened) == 1
     assert ticket.open_price == Decimal("60103")
     assert ticket.opened_at == datetime(2026, 3, 12, 12, 0, 2, tzinfo=timezone.utc)
-    assert ticket.initial_stop_loss == Decimal("60083")
-    assert ticket.hard_take_profit == Decimal("60143")
+    assert ticket.initial_stop_loss == Decimal("60080")
+    assert ticket.hard_take_profit == Decimal("60140")

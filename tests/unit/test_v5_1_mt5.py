@@ -244,7 +244,7 @@ def test_v5_1_continuation_override_promotes_clean_bull_run() -> None:
 
     assert decision is not None
     assert decision.action == "enter_long"
-    assert decision.requested_risk_fraction == 0.004
+    assert decision.requested_risk_fraction == 0.005
     assert "override" in decision.thesis_tags
 
 
@@ -303,7 +303,7 @@ def test_v5_1_continuation_override_accepts_aging_pause_after_impulse() -> None:
 
     assert decision is not None
     assert decision.action == "enter_long"
-    assert decision.requested_risk_fraction == 0.0025
+    assert decision.requested_risk_fraction == 0.0035
     assert "override" in decision.thesis_tags
 
 
@@ -358,7 +358,7 @@ def test_v5_1_continuation_override_promotes_bear_pause_after_impulse() -> None:
 
     assert decision is not None
     assert decision.action == "enter_short"
-    assert decision.requested_risk_fraction == 0.004
+    assert decision.requested_risk_fraction == 0.005
     assert "override" in decision.thesis_tags
 
 
@@ -412,7 +412,7 @@ def test_v5_1_fast_quote_entry_decision_detects_live_bull_acceleration() -> None
     assert decision is not None
     assert decision.action == "enter_long"
     assert decision.confidence == 0.72
-    assert decision.requested_risk_fraction == 0.004
+    assert decision.requested_risk_fraction == 0.005
     assert "fast_override" in decision.thesis_tags
 
 
@@ -467,7 +467,7 @@ def test_v5_1_fast_quote_entry_decision_accepts_aging_quotes() -> None:
     assert decision is not None
     assert decision.action == "enter_long"
     assert decision.confidence == 0.72
-    assert decision.requested_risk_fraction == 0.0025
+    assert decision.requested_risk_fraction == 0.0035
     assert "fast_override" in decision.thesis_tags
 
 
@@ -522,7 +522,7 @@ def test_v5_1_fast_quote_entry_decision_detects_live_bull_acceleration_without_2
     assert decision is not None
     assert decision.action == "enter_long"
     assert decision.confidence == 0.72
-    assert decision.requested_risk_fraction == 0.0025
+    assert decision.requested_risk_fraction == 0.0035
     assert "fast_override" in decision.thesis_tags
 
 
@@ -1356,6 +1356,7 @@ def test_v5_1_entry_protection_cycle_refreshes_misaligned_entry_levels(tmp_path)
             "hard_take_profit": Decimal("60128"),
             "soft_take_profit_1": Decimal("60118"),
             "soft_take_profit_2": Decimal("60128"),
+            "metadata": {"attach_protection_after_fill": True},
         }
     )
     registry = MT5V51TicketRegistry()
@@ -1386,7 +1387,56 @@ def test_v5_1_entry_protection_cycle_refreshes_misaligned_entry_levels(tmp_path)
     assert commands[0].take_profit == Decimal("60128")
 
 
-def test_v5_1_entry_protection_cycle_restores_tp_after_partial(tmp_path) -> None:
+def test_v5_1_entry_protection_cycle_does_not_move_static_ticket_levels(tmp_path) -> None:
+    base = datetime.now(timezone.utc).replace(microsecond=0)
+    snapshot = _snapshot(
+        server_time=base,
+        last_bar_end=base - timedelta(minutes=1),
+    ).model_copy(update={"bars_20s": _micro_bars(), "bid": Decimal("60109"), "ask": Decimal("60111")})
+    protected_ticket = _ticket(
+        partial_stage=0,
+        current_volume=Decimal("0.20"),
+        current_price=Decimal("60108"),
+        unrealized_r=0.2,
+    ).model_copy(
+        update={
+            "ticket_id": "2002-static",
+            "open_price": Decimal("60108"),
+            "stop_loss": Decimal("60088"),
+            "take_profit": Decimal("60128"),
+            "initial_stop_loss": Decimal("60088"),
+            "hard_take_profit": Decimal("60128"),
+            "soft_take_profit_1": Decimal("60118"),
+            "soft_take_profit_2": Decimal("60128"),
+            "metadata": {"attach_protection_after_fill": False},
+        }
+    )
+    registry = MT5V51TicketRegistry()
+    registry.seed([protected_ticket])
+    bridge_state = MT5V51BridgeState()
+    journal = Journal(str(Path(tmp_path) / "events.jsonl"))
+
+    queued = asyncio.run(
+        _run_entry_protection_cycle(
+            snapshot=snapshot,
+            agent_name="mt5_v51_primary",
+            event_journal=journal,
+            store=None,
+            registry=registry,
+            planner=MT5V51EntryPlanner(),
+            bridge_state=bridge_state,
+            shadow_mode=False,
+            logger=None,
+        )
+    )
+
+    commands = asyncio.run(bridge_state.poll_commands(limit=10))
+
+    assert queued is False
+    assert commands == []
+
+
+def test_v5_1_entry_protection_cycle_restores_missing_tp_without_moving_sl(tmp_path) -> None:
     base = datetime.now(timezone.utc).replace(microsecond=0)
     snapshot = _snapshot(
         server_time=base,
@@ -1397,7 +1447,13 @@ def test_v5_1_entry_protection_cycle_restores_tp_after_partial(tmp_path) -> None
         current_volume=Decimal("0.10"),
         current_price=Decimal("60112"),
         unrealized_r=0.6,
-    ).model_copy(update={"take_profit": None, "opened_at": base - timedelta(minutes=3)})
+    ).model_copy(
+        update={
+            "take_profit": None,
+            "opened_at": base - timedelta(minutes=3),
+            "metadata": {"attach_protection_after_fill": True},
+        }
+    )
     registry = MT5V51TicketRegistry()
     registry.seed([partial_ticket])
     bridge_state = MT5V51BridgeState()
@@ -1422,7 +1478,7 @@ def test_v5_1_entry_protection_cycle_restores_tp_after_partial(tmp_path) -> None
     assert queued is True
     assert len(commands) == 1
     assert commands[0].command_type == "modify_ticket"
-    assert commands[0].stop_loss == Decimal("60100")
+    assert commands[0].stop_loss == Decimal("60080")
     assert commands[0].take_profit == Decimal("60120")
 
 
