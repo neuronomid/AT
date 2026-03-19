@@ -44,6 +44,7 @@ at-agent-discovery-cycle = "app.discovery_cycle:main"
 at-agent-v4-live = "app.v4_live:main"
 at-agent-v5-mt5 = "app.v5_mt5:main"
 at-agent-v5-1-mt5 = "app.v5_1_mt5:main"
+at-agent-v6-0-mt5 = "app.v6_0_mt5:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
