@@ -39,7 +39,7 @@ def _snapshot(server_time: datetime) -> MT5V60BridgeSnapshot:
     return MT5V60BridgeSnapshot(
         server_time=server_time,
         received_at=datetime.now(timezone.utc),
-        symbol="BTCUSD@",
+        symbol="EURUSD@",
         bid=Decimal("70100"),
         ask=Decimal("70102"),
         spread_bps=0.4,
@@ -63,7 +63,7 @@ def _snapshot(server_time: datetime) -> MT5V60BridgeSnapshot:
 
 
 def test_mt5_v60_risk_policy_rejects_stale_preflight_snapshot() -> None:
-    arbiter = MT5V60RiskArbiter(symbol="BTCUSD@", stale_after_seconds=5)
+    arbiter = MT5V60RiskArbiter(symbol="EURUSD@", stale_after_seconds=5)
     registry = MT5V60TicketRegistry()
     snapshot = _snapshot(datetime.now(timezone.utc))
     snapshot.received_at = datetime.now(timezone.utc) - timedelta(seconds=10)
@@ -83,7 +83,7 @@ def test_mt5_v60_risk_policy_rejects_stale_preflight_snapshot() -> None:
 
 
 def test_mt5_v60_risk_policy_can_allow_stale_snapshot_for_post_llm_execution() -> None:
-    arbiter = MT5V60RiskArbiter(symbol="BTCUSD@", stale_after_seconds=5)
+    arbiter = MT5V60RiskArbiter(symbol="EURUSD@", stale_after_seconds=5)
     registry = MT5V60TicketRegistry()
     snapshot = _snapshot(datetime.now(timezone.utc))
     snapshot.received_at = datetime.now(timezone.utc) - timedelta(seconds=10)

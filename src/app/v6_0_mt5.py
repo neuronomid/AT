@@ -41,7 +41,7 @@ def _safe_store_call(logger, operation: str, fn, *args, **kwargs) -> None:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the V6.0 MT5 BTCUSD@ demo-paper orchestrator.")
+    parser = argparse.ArgumentParser(description="Run the V6.0 MT5 demo-paper orchestrator.")
     parser.add_argument("--agent-name", default=None)
     parser.add_argument("--duration-minutes", type=int, default=0)
     parser.add_argument("--session-tag", default=None)

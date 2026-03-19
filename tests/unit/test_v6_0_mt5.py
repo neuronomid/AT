@@ -40,9 +40,9 @@ def _ticket(*, analysis_mode: str, close_reason: str) -> MT5V60TicketRecord:
     now = datetime.now(timezone.utc).replace(microsecond=0)
     return MT5V60TicketRecord(
         ticket_id="1001",
-        symbol="BTCUSD@",
+        symbol="EURUSD@",
         side="long",
-        basket_id="BTCUSD-long-1",
+        basket_id="EURUSD-long-1",
         original_volume_lots=Decimal("0.10"),
         current_volume_lots=Decimal("0.10"),
         open_price=Decimal("70100"),
@@ -69,7 +69,7 @@ def _snapshot(*, bid: str = "70627", ask: str = "70653") -> MT5V60BridgeSnapshot
     return MT5V60BridgeSnapshot(
         server_time=now,
         received_at=now,
-        symbol="BTCUSD@",
+        symbol="EURUSD@",
         bid=Decimal(bid),
         ask=Decimal(ask),
         spread_bps=3.6,
@@ -243,7 +243,7 @@ def test_v6_0_entry_protection_cycle_queues_first_protection(tmp_path: Path) -> 
     now = snapshot.server_time
     ticket = MT5V60TicketRecord(
         ticket_id="1001",
-        symbol="BTCUSD@",
+        symbol="EURUSD@",
         side="short",
         basket_id="basket-1",
         original_volume_lots=Decimal("0.10"),
@@ -297,7 +297,7 @@ def test_v6_0_ticket_registry_marks_auto_first_protection_for_naked_fill() -> No
             "open_tickets": [
                 MT5V60LiveTicket(
                     ticket_id="1001",
-                    symbol="BTCUSD@",
+                    symbol="EURUSD@",
                     side="long",
                     volume_lots=Decimal("0.10"),
                     open_price=Decimal("70100"),
@@ -315,7 +315,7 @@ def test_v6_0_ticket_registry_marks_auto_first_protection_for_naked_fill() -> No
         [
             MT5V60TicketRecord(
                 ticket_id="1001",
-                symbol="BTCUSD@",
+                symbol="EURUSD@",
                 side="long",
                 basket_id="basket-1",
                 original_volume_lots=Decimal("0.10"),
@@ -354,7 +354,7 @@ def test_v6_0_manager_cycle_enqueues_modify_ticket_for_hold_command_with_tp(tmp_
         [
             MT5V60TicketRecord(
                 ticket_id="61690195",
-                symbol="BTCUSD@",
+                symbol="EURUSD@",
                 side="long",
                 basket_id="basket-1",
                 original_volume_lots=Decimal("0.38"),

@@ -14,7 +14,7 @@ class V60Settings(BaseSettings):
     v60_bridge_host: str = "127.0.0.1"
     v60_bridge_port: int = Field(default=8092, ge=1, le=65535)
     v60_bridge_id: str = "mt5-v60-local"
-    v60_mt5_symbol: str = "BTCUSD@"
+    v60_mt5_symbol: str = "EURUSD@"
     v60_mt5_account_mode: Literal["hedging", "netting"] = "hedging"
     v60_mt5_entry_timeout_seconds: int = Field(default=90, ge=10, le=300)
     v60_mt5_manager_sweep_seconds: int = Field(default=15, ge=5, le=60)

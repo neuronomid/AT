@@ -1,7 +1,7 @@
 #property strict
 
 input string BridgeBaseUrl = "http://127.0.0.1:8092";
-input string RuntimeSymbol = "BTCUSD@";
+input string RuntimeSymbol = "EURUSD@";
 input int PollIntervalSeconds = 1;
 input int HttpTimeoutMs = 3000;
 input int BarsLookback1m = 60;

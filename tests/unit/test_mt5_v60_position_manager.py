@@ -63,7 +63,7 @@ def test_mt5_v60_position_manager_normalizes_string_visual_context_update(monkey
         return (
             '{"decisions":[{"ticket_id":"61640705","confidence":0.62,'
             '"rationale":"Place first protection.","commands":[{"action":"modify_ticket","stop_loss_price":70046.5,"take_profit_price":69962.49,"close_fraction":null}],'
-            '"visual_context_update":"First protection placed for BTCUSD short."}]}'
+            '"visual_context_update":"First protection placed for EURUSD short."}]}'
         )
 
     monkeypatch.setattr(agent._client, "complete_json", _fake_complete_json)
@@ -73,7 +73,7 @@ def test_mt5_v60_position_manager_normalizes_string_visual_context_update(monkey
     assert decision.commands[0].action == "modify_ticket"
     assert decision.commands[0].stop_loss_price == Decimal("70046.5")
     assert decision.commands[0].take_profit_price == Decimal("69962.49")
-    assert decision.visual_context_update == {"summary": "First protection placed for BTCUSD short."}
+    assert decision.visual_context_update == {"summary": "First protection placed for EURUSD short."}
 
 
 def test_mt5_v60_position_manager_upgrades_hold_with_tp_change_to_modify_ticket(monkeypatch) -> None:

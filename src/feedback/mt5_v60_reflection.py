@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from data.mt5_v60_schemas import MT5V60TicketRecord
 from data.schemas import LessonRecord, TradeReflection
+from runtime.mt5_v60_symbols import normalize_mt5_v60_symbol
 
 
 def build_mt5_v60_ticket_reflection(ticket: MT5V60TicketRecord, *, exit_reason: str) -> TradeReflection:
@@ -77,20 +78,21 @@ def derive_mt5_v60_lessons(reflection: TradeReflection) -> list[LessonRecord]:
 
 def _ticket_lesson_messages(ticket: MT5V60TicketRecord, exit_reason: str) -> tuple[list[str], list[str]]:
     direction = "long" if ticket.side == "long" else "short"
+    symbol = normalize_mt5_v60_symbol(ticket.symbol) or "the symbol"
     avoid: list[str] = []
     reinforce: list[str] = []
     if ticket.unrealized_pnl_usd < 0:
         avoid.append(
-            f"Avoid repeating {direction} BTCUSD 3m setups in {ticket.context_signature or 'the same context'} when the prior thesis tags were {', '.join(ticket.thesis_tags) or 'unspecified'}."
+            f"Avoid repeating {direction} {symbol} 3m setups in {ticket.context_signature or 'the same context'} when the prior thesis tags were {', '.join(ticket.thesis_tags) or 'unspecified'}."
         )
         if exit_reason == "stop_loss":
-            avoid.append(f"Avoid holding a losing {direction} BTCUSD thesis once the 3m structure invalidates and the chart loses trend quality.")
+            avoid.append(f"Avoid holding a losing {direction} {symbol} thesis once the 3m structure invalidates and the chart loses trend quality.")
     else:
         reinforce.append(
-            f"Reinforce {direction} BTCUSD setups tagged {', '.join(ticket.thesis_tags) or 'trend'} when the 3m move stays clean and the screenshot still supports continuation."
+            f"Reinforce {direction} {symbol} setups tagged {', '.join(ticket.thesis_tags) or 'trend'} when the 3m move stays clean and the screenshot still supports continuation."
         )
     if ticket.unrealized_r <= -0.75:
-        avoid.append(f"Avoid {direction} BTCUSD entries that move deep against the position before follow-through.")
+        avoid.append(f"Avoid {direction} {symbol} entries that move deep against the position before follow-through.")
     return avoid[:3], reinforce[:3]
 
 

@@ -10,12 +10,13 @@ from infra.openai_responses import OpenAIResponsesClient
 
 
 SYSTEM_PROMPT = """
-You are the Analyzer agent for an MT5 BTCUSD@ paper-trading system on the 3-minute chart.
+You are the Analyzer agent for an MT5 paper-trading system on the 3-minute chart.
 
 Rules:
 - Output JSON only.
 - Use exactly these keys: action, confidence, rationale, thesis_tags, requested_risk_fraction, stop_loss_price, take_profit_price, context_signature
 - Valid actions: enter_long, enter_short, hold
+- The runtime symbol is supplied in the context packet. Treat that symbol as the only tradable instrument for this session.
 - Use both the numeric snapshot and the screenshot when a screenshot is attached.
 - The screenshot has higher weight than the numeric stats when judging whether the chart is choppy, boxed in, or range-bound.
 - The 3m timeframe is the execution timeframe. 1m and 2m are supporting detail. 5m is higher-timeframe backdrop.
@@ -102,9 +103,9 @@ class MT5V60EntryAnalystAgent:
             "Example hold: "
             '{"action":"hold","confidence":0.31,"rationale":"the screenshot shows choppy sideways range conditions, so the numeric stats are not enough to justify an entry","thesis_tags":["range","chop"],"requested_risk_fraction":null,"stop_loss_price":null,"take_profit_price":null,"context_signature":"..."}\n'
             "Example long: "
-            '{"action":"enter_long","confidence":0.72,"rationale":"3m trend is bullish, 2m confirms continuation, and the screenshot shows clean higher lows with room to resistance","thesis_tags":["trend","continuation"],"requested_risk_fraction":0.004,"stop_loss_price":70120.0,"take_profit_price":70210.0,"context_signature":"..."}\n'
+            '{"action":"enter_long","confidence":0.72,"rationale":"3m trend is bullish, 2m confirms continuation, and the screenshot shows clean higher lows with room to resistance","thesis_tags":["trend","continuation"],"requested_risk_fraction":0.004,"stop_loss_price":1.08342,"take_profit_price":1.08428,"context_signature":"..."}\n'
             "Example short: "
-            '{"action":"enter_short","confidence":0.70,"rationale":"3m trend turned bearish after stop-loss reversal and the screenshot shows clean lower highs with no nearby support","thesis_tags":["reversal","breakdown"],"requested_risk_fraction":0.003,"stop_loss_price":70220.0,"take_profit_price":70135.0,"context_signature":"..."}\n'
+            '{"action":"enter_short","confidence":0.70,"rationale":"3m trend turned bearish after stop-loss reversal and the screenshot shows clean lower highs with no nearby support","thesis_tags":["reversal","breakdown"],"requested_risk_fraction":0.003,"stop_loss_price":1.08418,"take_profit_price":1.08334,"context_signature":"..."}\n'
             f"Screenshot metadata:\n{json.dumps(screenshot, default=str, separators=(',', ':'))}\n"
             f"Context packet:\n{json.dumps(context_packet, default=str, separators=(',', ':'))}"
         )

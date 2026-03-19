@@ -43,7 +43,7 @@ def _snapshot() -> MT5V60BridgeSnapshot:
     return MT5V60BridgeSnapshot(
         server_time=now,
         received_at=now,
-        symbol="BTCUSD@",
+        symbol="EURUSD@",
         bid=Decimal("70100"),
         ask=Decimal("70102"),
         spread_bps=0.3,
@@ -137,7 +137,7 @@ def test_mt5_v60_manager_packet_includes_first_protection_and_partial_context() 
         [
             MT5V60TicketRecord(
                 ticket_id="1001",
-                symbol="BTCUSD@",
+                symbol="EURUSD@",
                 side="long",
                 basket_id="basket-1",
                 original_volume_lots=Decimal("0.10"),

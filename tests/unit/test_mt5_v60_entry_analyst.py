@@ -14,7 +14,7 @@ def test_mt5_v60_entry_analyst_normalizes_aliases(monkeypatch) -> None:
         return '{"action":"buy","confidence":0.72,"rationale":"clean trend","thesis_tags":"trend","risk_fraction":0.004,"sl":70100,"tp":70180,"context_signature":"bull|bull|bull|tight"}'
 
     monkeypatch.setattr(agent._client, "complete_json", _fake_complete_json)
-    result = asyncio.run(agent.analyze({"symbol": "BTCUSD@"}))
+    result = asyncio.run(agent.analyze({"symbol": "EURUSD@"}))
 
     assert result.decision.action == "enter_long"
     assert result.decision.stop_loss_price == 70100
@@ -30,7 +30,7 @@ def test_mt5_v60_entry_analyst_prompt_mentions_v6_structure() -> None:
         base_url="https://api.openai.com/v1",
     )
 
-    prompt = agent.build_prompt({"symbol": "BTCUSD@", "screenshot": {"capture_ok": True}})
+    prompt = agent.build_prompt({"symbol": "EURUSD@", "screenshot": {"capture_ok": True}})
 
     assert "recent_bars.3m" in prompt
     assert "1m and 2m" in prompt

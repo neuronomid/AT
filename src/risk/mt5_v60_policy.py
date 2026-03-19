@@ -36,7 +36,7 @@ class MT5V60RiskArbiter:
     def __init__(
         self,
         *,
-        symbol: str = "BTCUSD@",
+        symbol: str = "EURUSD@",
         account_mode: str = "hedging",
         min_confidence: float = 0.50,
         max_spread_bps: float = 15.0,
@@ -107,7 +107,11 @@ class MT5V60RiskArbiter:
         if self._daily_loss_triggered(snapshot):
             return MT5V60RiskDecision(approved=False, reason="Daily loss kill switch is active.", risk_posture=risk_posture)
         if registry.has_open_position(snapshot.symbol):
-            return MT5V60RiskDecision(approved=False, reason="A BTCUSD ticket is already open.", risk_posture=risk_posture)
+            return MT5V60RiskDecision(
+                approved=False,
+                reason="An open ticket already exists for the runtime symbol.",
+                risk_posture=risk_posture,
+            )
         if self.recent_trade_count(snapshot.server_time) >= self._max_trades_per_hour:
             return MT5V60RiskDecision(
                 approved=False,
