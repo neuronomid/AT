@@ -66,15 +66,11 @@ class MT5V60QuoteTape:
         recent_10s = self._window(current_received_at, seconds=10)
         current_spread = snapshot.spread_bps
         spreads = [sample.spread_bps for sample in recent_2m if sample.spread_bps is not None]
-        oldest = recent_10s[0] if recent_10s else None
         now_utc = _ensure_utc(now) if now is not None else datetime.now(timezone.utc)
         source_age_ms = max(0, int((now_utc - current_received_at).total_seconds() * 1000))
         return {
             "spread_percentile_2m": self._spread_percentile(current_spread=current_spread, spreads=spreads),
             "spread_to_3m_atr_ratio": self._spread_to_atr_ratio(current_spread=current_spread, primary_atr_bps=primary_atr_bps),
-            "bid_drift_bps_10s": self._drift_bps(current=float(snapshot.bid), reference=float(oldest.bid)) if oldest is not None else 0.0,
-            "ask_drift_bps_10s": self._drift_bps(current=float(snapshot.ask), reference=float(oldest.ask)) if oldest is not None else 0.0,
-            "mid_drift_bps_10s": self._drift_bps(current=float(snapshot.midpoint), reference=float(oldest.midpoint)) if oldest is not None else 0.0,
             "sample_count_2m": len(recent_2m),
             "sample_count_10s": len(recent_10s),
             "source_snapshot_age_ms": source_age_ms,
@@ -101,11 +97,6 @@ class MT5V60QuoteTape:
         if current_spread is None or primary_atr_bps is None or primary_atr_bps <= 0:
             return None
         return round(current_spread / primary_atr_bps, 4)
-
-    def _drift_bps(self, *, current: float, reference: float) -> float:
-        if reference == 0:
-            return 0.0
-        return round(((current - reference) / reference) * 10000.0, 4)
 
     def _age_bucket(self, age_ms: int) -> str:
         if age_ms <= 1000:

@@ -1,17 +1,39 @@
+import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
+from app.v6_0_mt5 import _run_manager_cycle
 from app.v6_0_mt5 import (
     _entry_command_expires_at,
     _advance_manager_screenshot_state,
     _execution_snapshot,
     _manager_should_attach_raw_image,
+    _run_entry_protection_cycle,
     _should_trigger_stop_loss_reversal,
 )
-from data.mt5_v60_schemas import MT5V60AccountSnapshot, MT5V60BridgeHealth, MT5V60BridgeSnapshot, MT5V60EntryDecision, MT5V60RiskDecision, MT5V60SymbolSpec
-from data.mt5_v60_schemas import MT5V60ScreenshotState, MT5V60TicketRecord
+from app.v6_0_config import V60Settings
+from brokers.mt5_v60 import MT5V60BridgeState
+from data.mt5_v60_schemas import (
+    MT5V60AccountSnapshot,
+    MT5V60BridgeHealth,
+    MT5V60BridgeSnapshot,
+    MT5V60EntryDecision,
+    MT5V60ManagementDecisionBatch,
+    MT5V60LiveTicket,
+    MT5V60RiskDecision,
+    MT5V60ScreenshotState,
+    MT5V60SymbolSpec,
+    MT5V60TicketRecord,
+)
+from execution.mt5_v60_entry_planner import MT5V60EntryPlanner
 from execution.mt5_v60_immediate_entry import MT5V60ImmediateEntryBuilder
+from execution.mt5_v60_ticket_registry import MT5V60TicketRegistry
+from memory.journal import Journal
+from risk.mt5_v60_policy import MT5V60RiskPostureEngine
+from runtime.mt5_v60_context_packet import MT5V60ContextBuilder
 
 
 def _ticket(*, analysis_mode: str, close_reason: str) -> MT5V60TicketRecord:
@@ -213,3 +235,205 @@ def test_v6_0_entry_command_expiry_is_based_on_queue_time_not_old_snapshot_time(
     expires_at = _entry_command_expires_at(stale_snapshot, stale_after_seconds=5)
 
     assert expires_at > datetime.now(timezone.utc)
+
+
+def test_v6_0_entry_protection_cycle_queues_first_protection(tmp_path: Path) -> None:
+    snapshot = _snapshot(bid="70060.00", ask="70065.00")
+    registry = MT5V60TicketRegistry()
+    now = snapshot.server_time
+    ticket = MT5V60TicketRecord(
+        ticket_id="1001",
+        symbol="BTCUSD@",
+        side="short",
+        basket_id="basket-1",
+        original_volume_lots=Decimal("0.10"),
+        current_volume_lots=Decimal("0.10"),
+        open_price=Decimal("70089.50"),
+        current_price=Decimal("70065.25"),
+        stop_loss=None,
+        take_profit=None,
+        initial_stop_loss=Decimal("70138.56"),
+        hard_take_profit=Decimal("70029.44"),
+        r_distance_price=Decimal("49.06"),
+        risk_amount_usd=Decimal("50"),
+        analysis_mode="standard_entry",
+        highest_favorable_close=Decimal("70065.25"),
+        lowest_favorable_close=Decimal("70065.25"),
+        metadata={"entry_submitted_without_broker_protection": True},
+        opened_at=now,
+        last_seen_at=now,
+    )
+    registry.seed([ticket])
+    bridge_state = MT5V60BridgeState("mt5-v60-local")
+    event_journal = Journal(str(tmp_path / "events.jsonl"))
+
+    queued = asyncio.run(
+        _run_entry_protection_cycle(
+            snapshot=snapshot,
+            settings=V60Settings(),
+            agent_name="test",
+            event_journal=event_journal,
+            store=None,
+            registry=registry,
+            planner=MT5V60EntryPlanner(),
+            bridge_state=bridge_state,
+            shadow_mode=False,
+            logger=logging.getLogger(__name__),
+        )
+    )
+
+    assert queued is True
+    commands = asyncio.run(bridge_state.poll_commands(limit=5))
+    assert len(commands) == 1
+    assert commands[0].command_type == "modify_ticket"
+    assert commands[0].metadata["action"] == "attach_first_protection_auto"
+    assert commands[0].stop_loss == Decimal("70138.56")
+    assert commands[0].take_profit == Decimal("70029.44")
+
+
+def test_v6_0_ticket_registry_marks_auto_first_protection_for_naked_fill() -> None:
+    snapshot = _snapshot().model_copy(
+        update={
+            "open_tickets": [
+                MT5V60LiveTicket(
+                    ticket_id="1001",
+                    symbol="BTCUSD@",
+                    side="long",
+                    volume_lots=Decimal("0.10"),
+                    open_price=Decimal("70100"),
+                    current_price=Decimal("70120"),
+                    stop_loss=Decimal("70080"),
+                    take_profit=Decimal("70140"),
+                    unrealized_pnl_usd=Decimal("20"),
+                )
+            ]
+        }
+    )
+    registry = MT5V60TicketRegistry()
+    now = snapshot.server_time
+    registry.seed(
+        [
+            MT5V60TicketRecord(
+                ticket_id="1001",
+                symbol="BTCUSD@",
+                side="long",
+                basket_id="basket-1",
+                original_volume_lots=Decimal("0.10"),
+                current_volume_lots=Decimal("0.10"),
+                open_price=Decimal("70100"),
+                current_price=Decimal("70100"),
+                stop_loss=None,
+                take_profit=None,
+                initial_stop_loss=Decimal("70080"),
+                hard_take_profit=Decimal("70140"),
+                r_distance_price=Decimal("20"),
+                risk_amount_usd=Decimal("50"),
+                analysis_mode="standard_entry",
+                highest_favorable_close=Decimal("70100"),
+                lowest_favorable_close=Decimal("70100"),
+                metadata={"entry_submitted_without_broker_protection": True},
+                opened_at=now,
+                last_seen_at=now,
+            )
+        ]
+    )
+
+    registry.sync(snapshot)
+    updated = registry.by_ticket_id("1001")
+
+    assert updated is not None
+    assert updated.first_protection_attached is True
+    assert updated.first_protection_review_pending is True
+
+
+def test_v6_0_manager_cycle_enqueues_modify_ticket_for_hold_command_with_tp(tmp_path: Path) -> None:
+    snapshot = _snapshot(bid="69883.0", ask="69909.0")
+    now = snapshot.server_time
+    registry = MT5V60TicketRegistry()
+    registry.seed(
+        [
+            MT5V60TicketRecord(
+                ticket_id="61690195",
+                symbol="BTCUSD@",
+                side="long",
+                basket_id="basket-1",
+                original_volume_lots=Decimal("0.38"),
+                current_volume_lots=Decimal("0.38"),
+                open_price=Decimal("69905.5"),
+                current_price=Decimal("69898.5"),
+                stop_loss=Decimal("69750.0"),
+                take_profit=None,
+                initial_stop_loss=Decimal("69750.0"),
+                hard_take_profit=Decimal("70109.0"),
+                r_distance_price=Decimal("155.5"),
+                risk_amount_usd=Decimal("57.99"),
+                analysis_mode="standard_entry",
+                highest_favorable_close=Decimal("69905.5"),
+                lowest_favorable_close=Decimal("69898.5"),
+                opened_at=now,
+                last_seen_at=now,
+            )
+        ]
+    )
+    bridge_state = MT5V60BridgeState("mt5-v60-local")
+    event_journal = Journal(str(tmp_path / "events.jsonl"))
+
+    class _FakeManagerAgent:
+        prompt_version = "test"
+
+        async def analyze(self, packet, *, image_path=None):
+            del packet, image_path
+            return SimpleNamespace(
+                decision_batch=MT5V60ManagementDecisionBatch.model_validate(
+                    {
+                        "decisions": [
+                            {
+                                "ticket_id": "61690195",
+                                "confidence": 0.55,
+                                "rationale": "Hold the trade but set the missing TP.",
+                                "commands": [
+                                    {
+                                        "action": "hold",
+                                        "stop_loss_price": "69750.0",
+                                        "take_profit_price": "70109.0",
+                                        "close_fraction": None,
+                                    }
+                                ],
+                                "visual_context_update": None,
+                            }
+                        ]
+                    }
+                ),
+                raw_response="{}",
+                latency_ms=12,
+            )
+
+    asyncio.run(
+        _run_manager_cycle(
+            snapshot=snapshot,
+            settings=V60Settings(),
+            agent_name="test",
+            event_journal=event_journal,
+            store=None,
+            registry=registry,
+            planner=MT5V60EntryPlanner(),
+            context_builder=MT5V60ContextBuilder(),
+            posture_engine=MT5V60RiskPostureEngine(),
+            bridge_state=bridge_state,
+            reflections=[],
+            lessons=[],
+            screenshot_state=MT5V60ScreenshotState(),
+            manager_agent=_FakeManagerAgent(),
+            shadow_mode=False,
+            logger=logging.getLogger(__name__),
+        )
+    )
+
+    commands = asyncio.run(bridge_state.poll_commands(limit=5))
+    assert len(commands) == 1
+    assert commands[0].command_type == "modify_ticket"
+    assert commands[0].ticket_id == "61690195"
+    assert commands[0].take_profit == Decimal("70109.0")
+    assert commands[0].stop_loss == Decimal("69750.0")
+    assert commands[0].metadata["action"] == "modify_ticket"
+    assert commands[0].metadata["source_action"] == "hold"

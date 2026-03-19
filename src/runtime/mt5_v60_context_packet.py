@@ -35,7 +35,6 @@ class MT5V60ContextBuilder:
         *,
         snapshot: MT5V60BridgeSnapshot,
         registry: MT5V60TicketRegistry,
-        risk_posture: str,
         screenshot_state: MT5V60ScreenshotState,
         reversal_context: dict[str, object] | None = None,
     ) -> dict[str, object]:
@@ -62,11 +61,6 @@ class MT5V60ContextBuilder:
                 "ask": self._round(float(snapshot.ask)),
                 "spread_bps": self._round(snapshot.spread_bps),
             },
-            "account": {
-                "balance": self._round(float(snapshot.account.balance)),
-                "equity": self._round(float(snapshot.account.equity)),
-                "free_margin": self._round(float(snapshot.account.free_margin)),
-            },
             "freshness": freshness,
             "microstructure": microstructure,
             "timeframes": {
@@ -86,7 +80,6 @@ class MT5V60ContextBuilder:
                 "5m": self._swing_distance_payload(snapshot.bars_5m, lookback=10, label="5m"),
             },
             "trend_regime": self._trend_regime_payload(one=one, two=two, three=three, five=five),
-            "risk_posture": risk_posture,
             "context_signature": context_signature,
             "screenshot": self._screenshot_payload(snapshot=snapshot, screenshot_state=screenshot_state, include_cached_visual=False),
         }
@@ -327,6 +320,10 @@ class MT5V60ContextBuilder:
     def _ticket_payload(self, *, ticket: MT5V60TicketRecord, allowed_actions: list[str], spread_bps: float | None) -> dict[str, object]:
         current_reward_to_tp_r: float | None = None
         current_risk_to_sl_r: float | None = None
+        max_favorable_r: float | None = None
+        drawdown_from_peak_r: float | None = None
+        volume_remaining_fraction: float | None = None
+        stop_at_or_better_than_breakeven: bool | None = None
         if ticket.take_profit is not None and ticket.r_distance_price > 0:
             if ticket.side == "long":
                 current_reward_to_tp_r = max(float((ticket.take_profit - ticket.current_price) / ticket.r_distance_price), 0.0)
@@ -337,11 +334,23 @@ class MT5V60ContextBuilder:
                 current_risk_to_sl_r = max(float((ticket.current_price - ticket.stop_loss) / ticket.r_distance_price), 0.0)
             else:
                 current_risk_to_sl_r = max(float((ticket.stop_loss - ticket.current_price) / ticket.r_distance_price), 0.0)
+            stop_at_or_better_than_breakeven = (
+                ticket.stop_loss >= ticket.open_price if ticket.side == "long" else ticket.stop_loss <= ticket.open_price
+            )
+        if ticket.r_distance_price > 0:
+            if ticket.side == "long":
+                max_favorable_r = max(float((ticket.highest_favorable_close - ticket.open_price) / ticket.r_distance_price), 0.0)
+            else:
+                max_favorable_r = max(float((ticket.open_price - ticket.lowest_favorable_close) / ticket.r_distance_price), 0.0)
+            drawdown_from_peak_r = max(self._optional_float(max_favorable_r) - ticket.unrealized_r, 0.0)
+        if ticket.original_volume_lots > 0:
+            volume_remaining_fraction = float(ticket.current_volume_lots / ticket.original_volume_lots)
         return {
             "ticket_id": ticket.ticket_id,
             "side": ticket.side,
             "current_volume_lots": float(ticket.current_volume_lots),
             "original_volume_lots": float(ticket.original_volume_lots),
+            "volume_remaining_fraction": self._round(volume_remaining_fraction),
             "open_price": float(ticket.open_price),
             "current_price": float(ticket.current_price),
             "stop_loss": float(ticket.stop_loss) if ticket.stop_loss is not None else None,
@@ -351,10 +360,19 @@ class MT5V60ContextBuilder:
             "risk_amount_usd": float(ticket.risk_amount_usd),
             "unrealized_pnl_usd": float(ticket.unrealized_pnl_usd),
             "unrealized_r": ticket.unrealized_r,
+            "max_favorable_r": self._round(max_favorable_r),
+            "drawdown_from_peak_r": self._round(drawdown_from_peak_r),
             "analysis_mode": ticket.analysis_mode,
             "spread_bps": self._round(spread_bps),
             "current_reward_to_tp_r": self._round(current_reward_to_tp_r),
             "current_risk_to_sl_r": self._round(current_risk_to_sl_r),
+            "highest_favorable_close": float(ticket.highest_favorable_close),
+            "lowest_favorable_close": float(ticket.lowest_favorable_close),
+            "partial_stage": ticket.partial_stage,
+            "entry_submitted_without_broker_protection": bool(ticket.metadata.get("entry_submitted_without_broker_protection")),
+            "first_protection_attached": ticket.first_protection_attached,
+            "first_protection_review_pending": ticket.first_protection_review_pending,
+            "stop_at_or_better_than_breakeven": stop_at_or_better_than_breakeven,
             "basket_id": ticket.basket_id,
             "allowed_actions": allowed_actions,
             "context_signature": ticket.context_signature,

@@ -9,6 +9,7 @@ from data.mt5_v60_schemas import (
     MT5V60ChartScreenshot,
     MT5V60ScreenshotState,
     MT5V60SymbolSpec,
+    MT5V60TicketRecord,
 )
 from execution.mt5_v60_ticket_registry import MT5V60TicketRegistry
 from runtime.mt5_v60_context_packet import MT5V60ContextBuilder
@@ -82,12 +83,20 @@ def test_mt5_v60_context_packet_uses_v6_timeframes() -> None:
         latest_screenshot_fingerprint="abc123",
     )
 
-    packet = builder.build_entry_packet(snapshot=snapshot, registry=registry, risk_posture="neutral", screenshot_state=state)
+    packet = builder.build_entry_packet(snapshot=snapshot, registry=registry, screenshot_state=state)
 
     assert set(packet["timeframes"]) == {"1m", "2m", "3m", "5m"}
     assert len(packet["recent_bars"]["3m"]) == 20
     assert len(packet["recent_bars"]["1m"]) == 10
     assert len(packet["recent_bars"]["2m"]) == 10
+    assert "account" not in packet
+    assert "risk_posture" not in packet
+    assert "feedback" not in packet
+    assert "recent_outcomes" not in str(packet)
+    assert "recent_lesson_tags" not in str(packet)
+    assert "bid_drift_bps_10s" not in packet["microstructure"]
+    assert "ask_drift_bps_10s" not in packet["microstructure"]
+    assert "mid_drift_bps_10s" not in packet["microstructure"]
     assert "20s" not in str(packet)
 
 
@@ -117,3 +126,66 @@ def test_mt5_v60_manager_packet_includes_cached_visual_context() -> None:
 
     assert packet["manager_context"]["image_attached"] is False
     assert packet["manager_context"]["screenshot"]["cached_visual_context"] == {"bias": "bullish"}
+
+
+def test_mt5_v60_manager_packet_includes_first_protection_and_partial_context() -> None:
+    builder = MT5V60ContextBuilder()
+    snapshot = _snapshot()
+    registry = MT5V60TicketRegistry()
+    now = snapshot.server_time
+    registry.seed(
+        [
+            MT5V60TicketRecord(
+                ticket_id="1001",
+                symbol="BTCUSD@",
+                side="long",
+                basket_id="basket-1",
+                original_volume_lots=Decimal("0.10"),
+                current_volume_lots=Decimal("0.05"),
+                open_price=Decimal("70080"),
+                current_price=Decimal("70140"),
+                stop_loss=Decimal("70080"),
+                take_profit=Decimal("70180"),
+                initial_stop_loss=Decimal("70040"),
+                hard_take_profit=Decimal("70180"),
+                r_distance_price=Decimal("40"),
+                risk_amount_usd=Decimal("50"),
+                analysis_mode="standard_entry",
+                partial_stage=1,
+                highest_favorable_close=Decimal("70160"),
+                lowest_favorable_close=Decimal("70080"),
+                metadata={"entry_submitted_without_broker_protection": True},
+                opened_at=now,
+                last_seen_at=now,
+                first_protection_attached=True,
+                first_protection_review_pending=True,
+                unrealized_pnl_usd=Decimal("75"),
+                unrealized_r=1.5,
+            )
+        ]
+    )
+    state = MT5V60ScreenshotState(
+        absolute_path="/tmp/latest.png",
+        latest_screenshot_capture_ts=snapshot.chart_screenshot.captured_at,
+        latest_screenshot_fingerprint="abc123",
+    )
+
+    packet = builder.build_manager_packet(
+        snapshot=snapshot,
+        registry=registry,
+        allowed_actions={"1001": ["hold", "modify_ticket", "close_partial", "close_ticket"]},
+        risk_posture="neutral",
+        reflections=[],
+        lessons=[],
+        screenshot_state=state,
+        include_raw_screenshot=False,
+    )
+
+    ticket = packet["tickets"][0]
+    assert ticket["first_protection_attached"] is True
+    assert ticket["first_protection_review_pending"] is True
+    assert ticket["volume_remaining_fraction"] == 0.5
+    assert ticket["partial_stage"] == 1
+    assert ticket["max_favorable_r"] == 2.0
+    assert ticket["drawdown_from_peak_r"] == 0.5
+    assert ticket["stop_at_or_better_than_breakeven"] is True

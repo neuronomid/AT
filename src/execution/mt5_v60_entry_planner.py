@@ -281,7 +281,7 @@ class MT5V60EntryPlanner:
                 return ticket.take_profit
             if candidate <= ticket.open_price:
                 return ticket.take_profit
-            if candidate - ticket.open_price > ticket.r_distance_price:
+            if candidate > self._round_up_to_tick(ticket.hard_take_profit, tick_size):
                 return ticket.take_profit
             return candidate
 
@@ -290,7 +290,7 @@ class MT5V60EntryPlanner:
             return ticket.take_profit
         if candidate >= ticket.open_price:
             return ticket.take_profit
-        if ticket.open_price - candidate > ticket.r_distance_price:
+        if candidate < self._round_down_to_tick(ticket.hard_take_profit, tick_size):
             return ticket.take_profit
         return candidate
 

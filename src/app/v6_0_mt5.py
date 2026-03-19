@@ -154,6 +154,27 @@ def _advance_manager_screenshot_state(
     )
 
 
+def _manager_command_changes_protection(
+    *,
+    command_spec,
+    ticket: MT5V60TicketRecord,
+) -> bool:
+    return (
+        (command_spec.stop_loss_price is not None and command_spec.stop_loss_price != ticket.stop_loss)
+        or (command_spec.take_profit_price is not None and command_spec.take_profit_price != ticket.take_profit)
+    )
+
+
+def _effective_management_action(
+    *,
+    command_spec,
+    ticket: MT5V60TicketRecord,
+) -> str:
+    if command_spec.action == "hold" and _manager_command_changes_protection(command_spec=command_spec, ticket=ticket):
+        return "modify_ticket"
+    return command_spec.action
+
+
 def _should_trigger_stop_loss_reversal(ticket: MT5V60TicketRecord) -> bool:
     return ticket.last_close_reason == "stop_loss" and ticket.analysis_mode != "stop_loss_reversal"
 
@@ -400,7 +421,6 @@ async def _run_entry_cycle(
     packet = context_builder.build_entry_packet(
         snapshot=snapshot,
         registry=registry,
-        risk_posture=risk_posture,
         screenshot_state=screenshot_state,
         reversal_context=reversal_context,
     )
@@ -558,13 +578,19 @@ async def _run_manager_cycle(
         if ticket is None:
             continue
         allowed = set(allowed_actions.get(ticket.ticket_id, ["hold"]))
-        for command_spec in decision.commands:
-            if command_spec.action == "hold":
+        effective_actions = [
+            _effective_management_action(command_spec=command_spec, ticket=ticket)
+            for command_spec in decision.commands
+        ]
+        reviewed_first_protection_keep = bool(decision.commands) and all(action == "hold" for action in effective_actions)
+        reviewed_first_protection_move = False
+        for command_spec, effective_action in zip(decision.commands, effective_actions, strict=False):
+            if effective_action == "hold":
                 continue
-            if command_spec.action not in allowed:
+            if effective_action not in allowed:
                 continue
             command = None
-            if command_spec.action == "modify_ticket":
+            if effective_action == "modify_ticket":
                 command = planner.build_modify_command(
                     ticket=ticket,
                     snapshot=snapshot,
@@ -573,9 +599,9 @@ async def _run_manager_cycle(
                     reason=decision.rationale,
                     created_at=snapshot.server_time,
                     expires_at=snapshot.server_time + timedelta(seconds=60),
-                    metadata={"action": "modify_ticket"},
+                    metadata={"action": "modify_ticket", "source_action": command_spec.action},
                 )
-            elif command_spec.action == "close_partial" and command_spec.close_fraction is not None:
+            elif effective_action == "close_partial" and command_spec.close_fraction is not None:
                 close_volume = planner.partial_close_volume(
                     original_volume_lots=ticket.current_volume_lots,
                     close_fraction=Decimal(str(command_spec.close_fraction)),
@@ -587,16 +613,20 @@ async def _run_manager_cycle(
                     reason=decision.rationale,
                     created_at=snapshot.server_time,
                     expires_at=snapshot.server_time + timedelta(seconds=60),
-                    metadata={"action": "close_partial", "close_fraction": command_spec.close_fraction},
+                    metadata={
+                        "action": "close_partial",
+                        "close_fraction": command_spec.close_fraction,
+                        "source_action": command_spec.action,
+                    },
                 )
-            elif command_spec.action == "close_ticket":
+            elif effective_action == "close_ticket":
                 command = planner.build_close_command(
                     ticket=ticket,
                     volume_lots=ticket.current_volume_lots,
                     reason=decision.rationale,
                     created_at=snapshot.server_time,
                     expires_at=snapshot.server_time + timedelta(seconds=60),
-                    metadata={"action": "close_ticket"},
+                    metadata={"action": "close_ticket", "source_action": command_spec.action},
                 )
             if command is None:
                 event_journal.record(
@@ -605,6 +635,7 @@ async def _run_manager_cycle(
                         "agent_name": agent_name,
                         "ticket_id": ticket.ticket_id,
                         "requested_action": command_spec.action,
+                        "effective_action": effective_action,
                         "requested_command": command_spec.model_dump(mode="json"),
                         "rationale": decision.rationale,
                     }
@@ -618,6 +649,8 @@ async def _run_manager_cycle(
                         "command": command.model_dump(mode="json"),
                     }
                 )
+                if effective_action == "modify_ticket":
+                    reviewed_first_protection_move = True
                 continue
             await bridge_state.queue_command(command)
             event_journal.record(
@@ -637,7 +670,91 @@ async def _run_manager_cycle(
                     command=command,
                     bridge_id=settings.v60_bridge_id,
                 )
+            if effective_action == "modify_ticket":
+                reviewed_first_protection_move = True
+        if ticket.first_protection_review_pending:
+            if reviewed_first_protection_move:
+                registry.record_first_protection_review(
+                    ticket.ticket_id,
+                    outcome="moved",
+                    reviewed_at=snapshot.server_time,
+                )
+            elif reviewed_first_protection_keep:
+                registry.record_first_protection_review(
+                    ticket.ticket_id,
+                    outcome="kept",
+                    reviewed_at=snapshot.server_time,
+                )
     return screenshot_state
+
+
+async def _run_entry_protection_cycle(
+    *,
+    snapshot: MT5V60BridgeSnapshot,
+    settings: V60Settings,
+    agent_name: str,
+    event_journal: Journal,
+    store: SupabaseMT5V60Store | None,
+    registry: MT5V60TicketRegistry,
+    planner: MT5V60EntryPlanner,
+    bridge_state: MT5V60BridgeState,
+    shadow_mode: bool,
+    logger,
+) -> bool:
+    tickets = registry.all(snapshot.symbol)
+    if not tickets:
+        return False
+    if await bridge_state.has_pending_symbol(snapshot.symbol):
+        return False
+
+    for ticket in tickets:
+        if ticket.stop_loss is not None and ticket.take_profit is not None:
+            continue
+        command = planner.build_modify_command(
+            ticket=ticket,
+            snapshot=snapshot,
+            stop_loss=ticket.initial_stop_loss,
+            take_profit=ticket.hard_take_profit,
+            reason=(
+                "Attach the first automatic protection from the internal entry anchors after a naked fill. "
+                "Manager must review this placement and either keep it or move it."
+            ),
+            created_at=snapshot.server_time,
+            expires_at=snapshot.server_time + timedelta(seconds=60),
+            metadata={"action": "attach_first_protection_auto"},
+        )
+        if command is None:
+            continue
+        if shadow_mode:
+            event_journal.record(
+                {
+                    "record_type": "mt5_v60_shadow_management_command",
+                    "agent_name": agent_name,
+                    "command_source": "entry_protection",
+                    "command": command.model_dump(mode="json"),
+                }
+            )
+            return True
+        await bridge_state.queue_command(command)
+        event_journal.record(
+            {
+                "record_type": "mt5_v60_bridge_command_enqueued",
+                "agent_name": agent_name,
+                "command_source": "entry_protection",
+                "command": command.model_dump(mode="json"),
+            }
+        )
+        if store is not None:
+            _safe_store_call(
+                logger,
+                "insert_mt5_v60_bridge_command_entry_protection",
+                store.insert_mt5_v60_bridge_command,
+                agent_name=agent_name,
+                command=command,
+                bridge_id=settings.v60_bridge_id,
+            )
+        return True
+    return False
 
 
 async def _shutdown_flatten_open_tickets(
@@ -848,9 +965,25 @@ async def run() -> None:
 
             has_open_position = registry.has_open_position(snapshot.symbol)
             if has_open_position:
+                protection_queued = await _run_entry_protection_cycle(
+                    snapshot=snapshot,
+                    settings=settings,
+                    agent_name=args.agent_name or settings.v60_agent_name,
+                    event_journal=event_journal,
+                    store=store,
+                    registry=registry,
+                    planner=planner,
+                    bridge_state=bridge_state,
+                    shadow_mode=shadow_mode,
+                    logger=logger,
+                )
+                if protection_queued:
+                    continue
+                tickets = registry.all(snapshot.symbol)
                 manager_due = (
                     last_manager_run_at is None
                     or snapshot.server_time >= last_manager_run_at + timedelta(seconds=settings.v60_mt5_manager_sweep_seconds)
+                    or (snapshot_updated and any(ticket.first_protection_review_pending for ticket in tickets))
                 )
                 if manager_due:
                     screenshot_state = await _run_manager_cycle(

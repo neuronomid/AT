@@ -233,6 +233,7 @@ class MT5V60TicketRecord(BaseModel):
     r_distance_price: Decimal = Field(gt=0)
     risk_amount_usd: Decimal = Field(ge=0)
     analysis_mode: Literal["standard_entry", "stop_loss_reversal"] = "standard_entry"
+    partial_stage: int = Field(default=0, ge=0, le=8)
     highest_favorable_close: Decimal
     lowest_favorable_close: Decimal
     thesis_tags: list[str] = Field(default_factory=list)
@@ -243,6 +244,8 @@ class MT5V60TicketRecord(BaseModel):
     last_seen_at: datetime
     last_close_reason: Literal["stop_loss", "take_profit", "manual_or_command", "unknown"] | None = None
     is_open: bool = True
+    first_protection_attached: bool = False
+    first_protection_review_pending: bool = False
     unrealized_pnl_usd: Decimal = Decimal("0")
     unrealized_r: float = 0.0
 

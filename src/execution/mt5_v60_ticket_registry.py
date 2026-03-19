@@ -149,10 +149,30 @@ class MT5V60TicketRegistry:
         ticket = self._records.get(ticket_id)
         if ticket is None:
             return ["hold"]
-        actions = ["hold", "modify_ticket", "close_ticket"]
-        if ticket.current_volume_lots > ticket.current_volume_lots * Decimal("0.5"):
-            actions.append("close_partial")
-        return actions
+        return ["hold", "modify_ticket", "close_partial", "close_ticket"]
+
+    def record_first_protection_review(
+        self,
+        ticket_id: str,
+        *,
+        outcome: str,
+        reviewed_at: datetime,
+    ) -> None:
+        ticket = self._records.get(ticket_id)
+        if ticket is None or not ticket.first_protection_review_pending:
+            return
+        metadata = dict(ticket.metadata)
+        metadata["first_protection_review_outcome"] = outcome
+        metadata["first_protection_reviewed_at"] = reviewed_at.isoformat()
+        updated = ticket.model_copy(
+            update={
+                "metadata": metadata,
+                "first_protection_review_pending": False,
+            }
+        )
+        self._records[ticket_id] = updated
+        if self._store is not None:
+            self._store.upsert_mt5_v60_ticket_state(updated)
 
     def _hydrate_record(self, *, live: MT5V60LiveTicket, snapshot: MT5V60BridgeSnapshot) -> MT5V60TicketRecord:
         matched_pending = None
@@ -235,6 +255,7 @@ class MT5V60TicketRegistry:
             r_distance_price=r_distance,
             risk_amount_usd=risk_amount_usd,
             analysis_mode=str(metadata.get("analysis_mode", "standard_entry")),
+            partial_stage=int(metadata.get("partial_stage", 0)),
             highest_favorable_close=entry_price,
             lowest_favorable_close=entry_price,
             thesis_tags=list(metadata.get("thesis_tags", [])),
@@ -243,6 +264,8 @@ class MT5V60TicketRegistry:
             metadata=metadata,
             opened_at=opened_at,
             last_seen_at=snapshot.server_time,
+            first_protection_attached=bool(metadata.get("first_protection_attached", False)),
+            first_protection_review_pending=bool(metadata.get("first_protection_review_pending", False)),
             unrealized_pnl_usd=live.unrealized_pnl_usd,
             unrealized_r=0.0,
         )
@@ -263,6 +286,16 @@ class MT5V60TicketRegistry:
         else:
             lowest_favorable = min(lowest_favorable, latest_close)
         unrealized_r = self._unrealized_r(record=record, current_price=current_price)
+        inferred_stage = self._infer_partial_stage(record.original_volume_lots, live.volume_lots)
+        first_protection_attached = record.first_protection_attached
+        first_protection_review_pending = record.first_protection_review_pending
+        if (
+            not first_protection_attached
+            and bool(record.metadata.get("entry_submitted_without_broker_protection"))
+            and (live.stop_loss is not None or live.take_profit is not None)
+        ):
+            first_protection_attached = True
+            first_protection_review_pending = True
         return record.model_copy(
             update={
                 "current_volume_lots": live.volume_lots,
@@ -273,8 +306,11 @@ class MT5V60TicketRegistry:
                 "is_open": True,
                 "unrealized_pnl_usd": live.unrealized_pnl_usd,
                 "unrealized_r": unrealized_r,
+                "partial_stage": max(record.partial_stage, inferred_stage),
                 "highest_favorable_close": highest_favorable,
                 "lowest_favorable_close": lowest_favorable,
+                "first_protection_attached": first_protection_attached,
+                "first_protection_review_pending": first_protection_review_pending,
             }
         )
 
@@ -301,6 +337,16 @@ class MT5V60TicketRegistry:
         if record.side == "long":
             return float((current_price - record.open_price) / record.r_distance_price)
         return float((record.open_price - current_price) / record.r_distance_price)
+
+    def _infer_partial_stage(self, original_volume: Decimal, current_volume: Decimal) -> int:
+        if original_volume <= 0:
+            return 0
+        closed_fraction = 1 - float(current_volume / original_volume)
+        if closed_fraction >= 0.65:
+            return 2
+        if closed_fraction >= 0.20:
+            return 1
+        return 0
 
     def _default_take_profit(self, *, entry_price: Decimal, stop_loss: Decimal, side: str) -> Decimal:
         r_distance = abs(entry_price - stop_loss)
