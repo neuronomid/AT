@@ -17,7 +17,7 @@ class V60Settings(BaseSettings):
     v60_mt5_symbol: str = "EURUSD@"
     v60_mt5_account_mode: Literal["hedging", "netting"] = "hedging"
     v60_mt5_entry_timeout_seconds: int = Field(default=90, ge=10, le=300)
-    v60_mt5_manager_sweep_seconds: int = Field(default=15, ge=5, le=60)
+    v60_mt5_manager_sweep_seconds: int = Field(default=5, ge=5, le=60)
     v60_mt5_enable_trade_commands: bool = True
     v60_mt5_shadow_mode: bool = False
     v60_max_trades_per_hour: int = Field(default=15, ge=1)
@@ -37,7 +37,7 @@ class V60Settings(BaseSettings):
     v60_openai_model: str = "gpt-5-nano"
     v60_openai_base_url: str = "https://api.openai.com/v1"
     v60_entry_reasoning_effort: Literal["minimal", "low", "medium", "high"] = "high"
-    v60_manager_reasoning_effort: Literal["off", "minimal", "low", "medium", "high"] = "off"
+    v60_manager_reasoning_effort: Literal["off", "minimal", "low", "medium", "high"] = "low"
 
     v60_enable_supabase: bool = False
     v60_supabase_db_url: SecretStr | None = Field(

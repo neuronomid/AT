@@ -27,6 +27,7 @@ class MT5V60BridgeState:
         self._lock = asyncio.Lock()
         self._snapshot_queue: asyncio.Queue[MT5V60BridgeSnapshot] = asyncio.Queue()
         self._latest_snapshot: MT5V60BridgeSnapshot | None = None
+        self._latest_snapshots_by_symbol: dict[str, MT5V60BridgeSnapshot] = {}
         self._pending_commands: OrderedDict[str, MT5V60BridgeCommand] = OrderedDict()
         self._inflight_commands: OrderedDict[str, MT5V60BridgeCommand] = OrderedDict()
         self._acks: deque[MT5V60ExecutionAck] = deque(maxlen=max_acks)
@@ -34,6 +35,7 @@ class MT5V60BridgeState:
 
     async def publish_snapshot(self, snapshot: MT5V60BridgeSnapshot) -> MT5V60BridgeSnapshot:
         received_at = datetime.now(timezone.utc)
+        normalized_symbol = normalize_mt5_v60_symbol(snapshot.symbol)
         async with self._lock:
             normalized = snapshot.model_copy(
                 update={
@@ -51,6 +53,8 @@ class MT5V60BridgeState:
                 }
             )
             self._latest_snapshot = normalized
+            if normalized_symbol:
+                self._latest_snapshots_by_symbol[normalized_symbol] = normalized
             self._health = normalized.health
             self._snapshot_queue.put_nowait(normalized)
             return normalized
@@ -60,9 +64,16 @@ class MT5V60BridgeState:
             return await self._snapshot_queue.get()
         return await asyncio.wait_for(self._snapshot_queue.get(), timeout=timeout)
 
-    async def latest_snapshot(self) -> MT5V60BridgeSnapshot | None:
+    async def latest_snapshot(self, symbol: str | None = None) -> MT5V60BridgeSnapshot | None:
         async with self._lock:
+            if symbol is not None:
+                normalized = normalize_mt5_v60_symbol(symbol)
+                return self._latest_snapshots_by_symbol.get(normalized)
             return self._latest_snapshot
+
+    async def latest_snapshots(self) -> dict[str, MT5V60BridgeSnapshot]:
+        async with self._lock:
+            return dict(self._latest_snapshots_by_symbol)
 
     async def queue_command(self, command: MT5V60BridgeCommand) -> None:
         async with self._lock:
@@ -70,7 +81,7 @@ class MT5V60BridgeState:
             now = datetime.now(timezone.utc)
             self._health = self._health.model_copy(update={"last_command_at": now, "pending_command_count": self._pending_command_count()})
 
-    async def poll_commands(self, limit: int = 10) -> list[MT5V60BridgeCommand]:
+    async def poll_commands(self, limit: int = 10, symbol: str | None = None) -> list[MT5V60BridgeCommand]:
         async with self._lock:
             now = datetime.now(timezone.utc)
             expired_ids = [
@@ -90,7 +101,14 @@ class MT5V60BridgeState:
                         message="Command expired before MT5 polled it.",
                     )
                 )
-            commands = list(self._pending_commands.values())[: max(1, limit)]
+            normalized_symbol = normalize_mt5_v60_symbol(symbol or "")
+            commands: list[MT5V60BridgeCommand] = []
+            for command in self._pending_commands.values():
+                if normalized_symbol and normalize_mt5_v60_symbol(command.symbol) != normalized_symbol:
+                    continue
+                commands.append(command)
+                if len(commands) >= max(1, limit):
+                    break
             for command in commands:
                 self._pending_commands.pop(command.command_id, None)
                 self._inflight_commands[command.command_id] = command

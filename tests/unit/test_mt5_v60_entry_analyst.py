@@ -32,12 +32,13 @@ def test_mt5_v60_entry_analyst_prompt_mentions_v6_structure() -> None:
 
     prompt = agent.build_prompt({"symbol": "EURUSD@", "screenshot": {"capture_ok": True}})
 
+    assert "entry_signals" in prompt
     assert "recent_bars.3m" in prompt
     assert "1m and 2m" in prompt
-    assert "The screenshot carries more weight" in prompt
-    assert "If the picture looks choppy or range-bound, default to hold" in prompt
+    assert "Do not let 5m become a hard veto" in prompt
+    assert "scale requested_risk_fraction down instead of defaulting to hold" in prompt
     assert "Take profit distance must stay realistic and within 1.0R" in prompt
     assert "0.005 means 0.5% of current total balance" in prompt
     assert "enter without broker-side TP/SL" in prompt
     assert "Screenshot metadata" in prompt
-    assert agent.prompt_version == "v6.0_multimodal_v2"
+    assert agent.prompt_version == "v6.0_multimodal_v3"

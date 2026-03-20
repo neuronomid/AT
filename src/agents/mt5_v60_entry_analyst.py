@@ -10,7 +10,7 @@ from infra.openai_responses import OpenAIResponsesClient
 
 
 SYSTEM_PROMPT = """
-You are the Analyzer agent for an MT5 paper-trading system on the 3-minute chart.
+You are the Analyzer agent for an MT5 paper-trading scalping system on the 3-minute chart.
 
 Rules:
 - Output JSON only.
@@ -18,12 +18,13 @@ Rules:
 - Valid actions: enter_long, enter_short, hold
 - The runtime symbol is supplied in the context packet. Treat that symbol as the only tradable instrument for this session.
 - Use both the numeric snapshot and the screenshot when a screenshot is attached.
-- The screenshot has higher weight than the numeric stats when judging whether the chart is choppy, boxed in, or range-bound.
-- The 3m timeframe is the execution timeframe. 1m and 2m are supporting detail. 5m is higher-timeframe backdrop.
+- The 3m timeframe is the execution timeframe. 1m and 2m are supporting detail for breakout confirmation and timing. 5m is higher-timeframe backdrop only.
 - The primary job is to find tradeable trend, trend strength, and consolidation/range conditions to avoid.
-- If the screenshot looks choppy, sideways, compressed, or trapped in a visible range, action should be hold unless both the image and the numeric snapshot show a clean breakout with expansion.
-- Numeric stats can confirm a clean setup, but they must not overrule a visually messy chart in choppy or range-bound regimes.
-- Prefer hold when the market is choppy, compressed, indecisive, or visually trapped in a tight range.
+- When 3m, 2m, and 1m are aligned on a clear breakout or continuation, that lower-timeframe alignment is the deciding factor for entry timing.
+- 5m must not veto a clear 3m/2m/1m breakout by itself. Use 5m only to describe whether the broader backdrop is supportive, neutral, or early/opposed.
+- If the setup is valid but not the strongest, reduce requested risk instead of defaulting to hold.
+- Prefer hold when the market is genuinely choppy, compressed, indecisive, or visually trapped in a tight range across the 3m/2m/1m structure.
+- Do not miss obvious fast trend continuations just because 5m has not fully expanded yet.
 - When entering, choose a safe but not excessively wide stop loss and a realistic take profit.
 - Stop loss and take profit must be actual prices, not percentages.
 - stop_loss_price and take_profit_price are internal planning anchors for sizing and for the Manager's first protection pass. The live entry will be sent without broker-side TP/SL.
@@ -32,7 +33,7 @@ Rules:
 - Do not emit lot size or broker commands.
 - For stop-loss reversal checks, only the opposite side of the stopped trade is allowed.
 - Consider spread in your stop placement logic.
-- If the screenshot is missing or stale, lower conviction and prefer hold unless the numeric packet is unusually clear.
+- If the screenshot is missing or stale, lower conviction, but still allow a clear numeric 3m/2m/1m breakout to trade with reduced risk when the packet is unusually clear.
 """.strip()
 
 
@@ -52,7 +53,7 @@ class MT5V60EntryAnalystAgent:
         model: str,
         base_url: str,
         reasoning_effort: str = "high",
-        prompt_version: str = "v6.0_multimodal_v2",
+        prompt_version: str = "v6.0_multimodal_v3",
     ) -> None:
         self._client = OpenAIResponsesClient(api_key=api_key, base_url=base_url, app_name="AT V6.0 Analyzer")
         self._model = model
@@ -91,11 +92,12 @@ class MT5V60EntryAnalystAgent:
         return (
             "Return only JSON for the entry decision.\n"
             'Schema: {"action","confidence","rationale","thesis_tags","requested_risk_fraction","stop_loss_price","take_profit_price","context_signature"}.\n'
-            "Use recent_bars.3m as the main execution structure. Use 1m and 2m for detail and 5m for backdrop.\n"
-            "Use both numeric stats and the screenshot. The screenshot carries more weight when deciding whether the chart is choppy, range-bound, boxed in, or too messy to trade.\n"
-            "The screenshot is for major trend, trend quality, consolidation, nearby barriers, and safer stop/target placement.\n"
-            "If the picture looks choppy or range-bound, default to hold even when the stats look tempting. Only enter when the screenshot and the stats both show clean expansion out of that regime.\n"
-            "Do not chase unclear breakouts. Prefer hold in compression, range, or mixed structure.\n"
+            "Read entry_signals first, then recent_bars.3m, then recent_bars.2m and recent_bars.1m.\n"
+            "Use recent_bars.3m as the main execution structure. Use 1m and 2m for breakout and continuation timing. Use 5m only as backdrop.\n"
+            "Use both numeric stats and the screenshot. The screenshot is for major trend, trend quality, nearby barriers, and safer stop/target placement.\n"
+            "A clear aligned breakout on 3m, 2m, and 1m should be traded even if 5m is only neutral or still early. Do not let 5m become a hard veto.\n"
+            "If the setup is valid but less clean, scale requested_risk_fraction down instead of defaulting to hold.\n"
+            "Prefer hold in genuine compression, range, or mixed structure, not in obvious aligned trend continuation.\n"
             "If entering, requested_risk_fraction must be <= 0.005, where 0.005 means 0.5% of current total balance.\n"
             "Choose requested_risk_fraction from your reading of trend strength and price action quality. Cleaner and stronger movement may justify more risk; weak or messy structure should use less.\n"
             "Both stop_loss_price and take_profit_price must be present as internal planning anchors. The system will enter without broker-side TP/SL, then the Manager will decide live placement.\n"
@@ -103,7 +105,7 @@ class MT5V60EntryAnalystAgent:
             "Example hold: "
             '{"action":"hold","confidence":0.31,"rationale":"the screenshot shows choppy sideways range conditions, so the numeric stats are not enough to justify an entry","thesis_tags":["range","chop"],"requested_risk_fraction":null,"stop_loss_price":null,"take_profit_price":null,"context_signature":"..."}\n'
             "Example long: "
-            '{"action":"enter_long","confidence":0.72,"rationale":"3m trend is bullish, 2m confirms continuation, and the screenshot shows clean higher lows with room to resistance","thesis_tags":["trend","continuation"],"requested_risk_fraction":0.004,"stop_loss_price":1.08342,"take_profit_price":1.08428,"context_signature":"..."}\n'
+            '{"action":"enter_long","confidence":0.72,"rationale":"3m breakout structure is bullish, 2m and 1m confirm continuation, and 5m is only backdrop rather than a veto","thesis_tags":["trend","continuation"],"requested_risk_fraction":0.004,"stop_loss_price":1.08342,"take_profit_price":1.08428,"context_signature":"..."}\n'
             "Example short: "
             '{"action":"enter_short","confidence":0.70,"rationale":"3m trend turned bearish after stop-loss reversal and the screenshot shows clean lower highs with no nearby support","thesis_tags":["reversal","breakdown"],"requested_risk_fraction":0.003,"stop_loss_price":1.08418,"take_profit_price":1.08334,"context_signature":"..."}\n'
             f"Screenshot metadata:\n{json.dumps(screenshot, default=str, separators=(',', ':'))}\n"

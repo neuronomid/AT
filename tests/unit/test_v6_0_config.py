@@ -30,15 +30,16 @@ def test_v6_0_settings_allows_explicit_v60_supabase_opt_in(monkeypatch) -> None:
     assert settings.supabase_db_dsn == "postgresql://v60-db"
 
 
-def test_v6_0_settings_default_manager_reasoning_is_off(monkeypatch) -> None:
+def test_v6_0_settings_default_manager_reasoning_is_low(monkeypatch) -> None:
     monkeypatch.delenv("V60_MANAGER_REASONING_EFFORT", raising=False)
 
     settings = V60Settings(_env_file=None)
 
     assert settings.v60_mt5_symbol == "EURUSD@"
     assert settings.v60_entry_reasoning_effort == "high"
-    assert settings.v60_manager_reasoning_effort == "off"
-    assert settings.manager_reasoning_effort is None
+    assert settings.v60_mt5_manager_sweep_seconds == 5
+    assert settings.v60_manager_reasoning_effort == "low"
+    assert settings.manager_reasoning_effort == "low"
 
 
 def test_v6_0_settings_allows_explicit_manager_reasoning_effort(monkeypatch) -> None:

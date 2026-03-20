@@ -28,8 +28,11 @@ Rules:
 - When placing or moving a stop, keep it outside obvious noise and spread so it is not trivially clipped, but do not place it wider than the initial Analyzer risk anchor.
 - Do not set a take profit farther than initial_take_profit unless you are closing exposure instead of extending it.
 - Decide deliberately when breakeven is justified. Do not force breakeven only because the trade is slightly green.
+- This is an active scalp manager, not a passive observer. Do not leave stop and take-profit unchanged for the full life of a fast trade unless the structure clearly still justifies it.
 - Trail the stop only in the profitable direction. Use favorable excursion, recent candles, and obvious structure so the stop tightens without choking the trade too early.
 - Use partial closes when the trade has extended, hits a barrier, or gives back too much from the best excursion. Prefer meaningful de-risking over random slicing.
+- When 1m, 2m, and 3m start reversing against the trade or the trade gives back a meaningful part of its best excursion, protect profit or cut risk instead of just holding.
+- If the trade is valid but not strong enough to hold unchanged, choose modify_ticket or close_partial. Do not default to hold out of caution.
 - If the current call includes a fresh screenshot, inspect it and return visual_context_update as an object, for example {"summary":"..."}.
 - If the current call does not include a fresh screenshot, use cached_visual_context and set visual_context_update to null.
 - Prefer hold when the trade still looks valid.
@@ -55,7 +58,7 @@ class MT5V60PositionManagerAgent:
         model: str,
         base_url: str,
         reasoning_effort: str | None = None,
-        prompt_version: str = "v6.0_multimodal_v1",
+        prompt_version: str = "v6.0_multimodal_v2",
     ) -> None:
         self._client = OpenAIResponsesClient(api_key=api_key, base_url=base_url, app_name="AT V6.0 Manager")
         self._model = model
@@ -100,7 +103,9 @@ class MT5V60PositionManagerAgent:
             "When you place the first stop, keep it outside normal spread/noise and nearby chart clutter. Do not tuck it so close that a normal wiggle is likely to stop the trade immediately.\n"
             "Do not widen beyond ticket.initial_stop_loss. Do not set take profit farther than ticket.initial_take_profit.\n"
             "Decide when breakeven is justified from the trade structure, favorable excursion, and recent pullback behavior. Use max_favorable_r, drawdown_from_peak_r, stop_at_or_better_than_breakeven, and volume_remaining_fraction when useful.\n"
-            "You are also responsible for trailing and partial management. Trail only in the profitable direction and use partials deliberately when extension starts fading or a barrier is near.\n"
+            "You are also responsible for active trailing and partial management. Trail only in the profitable direction and use partials deliberately when extension starts fading or a barrier is near.\n"
+            "If 1m, 2m, and 3m begin to reverse against the open trade or the trade gives back too much from max_favorable_r, protect profit or reduce exposure instead of sitting still.\n"
+            "If the trade is still valid but not strong enough to leave unchanged, use modify_ticket or close_partial rather than defaulting to hold.\n"
             'If manager_context.image_attached is true, inspect the screenshot and return visual_context_update as an object like {"summary":"..."}.\n'
             "If manager_context.image_attached is false, use manager_context.screenshot.cached_visual_context and set visual_context_update to null.\n"
             f"Context packet:\n{json.dumps(context_packet, default=str, separators=(',', ':'))}"

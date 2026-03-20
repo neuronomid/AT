@@ -8,13 +8,13 @@
 input ENUM_BASE_CORNER InpPanelCorner = CORNER_RIGHT_UPPER;
 input int InpXOffset = 18;
 input int InpYOffset = 24;
-input int InpPanelWidth = 246;
-input int InpPanelHeight = 94;
+input int InpPanelWidth = 185;
+input int InpPanelHeight = 71;
 input string InpUiFont = "Segoe UI";
 input string InpCountdownFont = "Consolas";
-input int InpTitleFontSize = 7;
-input int InpCountdownFontSize = 21;
-input int InpDetailFontSize = 7;
+input int InpTitleFontSize = 5;
+input int InpCountdownFontSize = 16;
+input int InpDetailFontSize = 5;
 input color InpPanelColor = C'17,24,39';
 input color InpBorderColor = C'49,66,91';
 input color InpAccentColor = C'36,184,240';
@@ -33,6 +33,11 @@ string g_window_name = "";
 string g_status_name = "";
 datetime g_current_bar_open = 0;
 int g_period_seconds = 0;
+
+int ScaleUiMetric(const int value)
+{
+   return((int)MathRound(value * 0.75));
+}
 
 int OnInit()
 {
@@ -115,11 +120,11 @@ bool BuildInterface()
    int panel_y = ResolvePanelYDistance(InpPanelHeight);
    bool ok = true;
    ok = EnsureRectangleLabel(g_panel_name, panel_x, panel_y, InpPanelWidth, InpPanelHeight, InpPanelColor, InpBorderColor, 1) && ok;
-   ok = EnsureRectangleLabel(g_accent_name, panel_x, panel_y, 5, InpPanelHeight, InpAccentColor, InpAccentColor, 0) && ok;
-   ok = EnsureTextLabel(g_title_name, ResolveTextXDistance(14), ResolveTextYDistance(10), InpUiFont, InpTitleFontSize, InpTitleColor) && ok;
-   ok = EnsureTextLabel(g_value_name, ResolveTextXDistance(14), ResolveTextYDistance(25), InpCountdownFont, InpCountdownFontSize, InpCountdownColor) && ok;
-   ok = EnsureTextLabel(g_window_name, ResolveTextXDistance(14), ResolveTextYDistance(58), InpUiFont, InpDetailFontSize, InpDetailColor) && ok;
-   ok = EnsureTextLabel(g_status_name, ResolveTextXDistance(14), ResolveTextYDistance(74), InpUiFont, InpDetailFontSize, InpAccentColor) && ok;
+   ok = EnsureRectangleLabel(g_accent_name, panel_x, panel_y, ScaleUiMetric(5), InpPanelHeight, InpAccentColor, InpAccentColor, 0) && ok;
+   ok = EnsureTextLabel(g_title_name, ResolveTextXDistance(ScaleUiMetric(14)), ResolveTextYDistance(ScaleUiMetric(10)), InpUiFont, InpTitleFontSize, InpTitleColor) && ok;
+   ok = EnsureTextLabel(g_value_name, ResolveTextXDistance(ScaleUiMetric(14)), ResolveTextYDistance(ScaleUiMetric(25)), InpCountdownFont, InpCountdownFontSize, InpCountdownColor) && ok;
+   ok = EnsureTextLabel(g_window_name, ResolveTextXDistance(ScaleUiMetric(14)), ResolveTextYDistance(ScaleUiMetric(58)), InpUiFont, InpDetailFontSize, InpDetailColor) && ok;
+   ok = EnsureTextLabel(g_status_name, ResolveTextXDistance(ScaleUiMetric(14)), ResolveTextYDistance(ScaleUiMetric(74)), InpUiFont, InpDetailFontSize, InpAccentColor) && ok;
    return(ok);
 }
 

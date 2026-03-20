@@ -95,10 +95,17 @@ class MT5V60TicketRegistry:
             self._store.upsert_mt5_v60_ticket_state(record)
         self._pending_entries.pop(ack.command_id, None)
 
-    def sync(self, snapshot: MT5V60BridgeSnapshot) -> MT5V60RegistrySyncResult:
-        incoming = {ticket.ticket_id: ticket for ticket in snapshot.open_tickets}
+    def sync(self, snapshot: MT5V60BridgeSnapshot, *, scope_symbol: str | None = None) -> MT5V60RegistrySyncResult:
+        normalized_scope = normalize_mt5_v60_symbol(scope_symbol or "")
+        incoming = {
+            ticket.ticket_id: ticket
+            for ticket in snapshot.open_tickets
+            if not normalized_scope or normalize_mt5_v60_symbol(ticket.symbol) == normalized_scope
+        }
         result = MT5V60RegistrySyncResult()
         for ticket_id, record in list(self._records.items()):
+            if normalized_scope and normalize_mt5_v60_symbol(record.symbol) != normalized_scope:
+                continue
             if ticket_id not in incoming:
                 close_event = self._matching_close_event(snapshot=snapshot, record=record)
                 closed = record.model_copy(

@@ -80,6 +80,7 @@ class MT5V60ContextBuilder:
                 "5m": self._swing_distance_payload(snapshot.bars_5m, lookback=10, label="5m"),
             },
             "trend_regime": self._trend_regime_payload(one=one, two=two, three=three, five=five),
+            "entry_signals": self._entry_signal_payload(one=one, two=two, three=three, five=five),
             "context_signature": context_signature,
             "screenshot": self._screenshot_payload(snapshot=snapshot, screenshot_state=screenshot_state, include_cached_visual=False),
         }
@@ -108,6 +109,10 @@ class MT5V60ContextBuilder:
             )
             for ticket in registry.all(snapshot.symbol)
         ]
+        one = self._timeframe_summary(snapshot.bars_1m, label="1m")
+        two = self._timeframe_summary(snapshot.bars_2m, label="2m")
+        three = self._timeframe_summary(snapshot.bars_3m, label="3m")
+        five = self._timeframe_summary(snapshot.bars_5m, label="5m")
         return {
             "symbol": snapshot.symbol,
             "server_time": snapshot.server_time.isoformat(),
@@ -123,10 +128,10 @@ class MT5V60ContextBuilder:
                 "open_profit": self._round(float(snapshot.account.open_profit)),
             },
             "timeframes": {
-                "1m": self._timeframe_summary(snapshot.bars_1m, label="1m"),
-                "2m": self._timeframe_summary(snapshot.bars_2m, label="2m"),
-                "3m": self._timeframe_summary(snapshot.bars_3m, label="3m"),
-                "5m": self._timeframe_summary(snapshot.bars_5m, label="5m"),
+                "1m": one,
+                "2m": two,
+                "3m": three,
+                "5m": five,
             },
             "recent_bars": {
                 "1m": self._recent_bar_window(snapshot.bars_1m, limit=10),
@@ -134,6 +139,7 @@ class MT5V60ContextBuilder:
                 "3m": self._recent_bar_window(snapshot.bars_3m, limit=20),
                 "5m": self._recent_bar_window(snapshot.bars_5m, limit=10),
             },
+            "entry_signals": self._entry_signal_payload(one=one, two=two, three=three, five=five),
             "tickets": tickets,
             "risk_posture": risk_posture,
             "feedback": self._feedback_payload(reflections=reflections, lessons=lessons),
@@ -179,7 +185,20 @@ class MT5V60ContextBuilder:
             "consecutive_bull_closes": self._consecutive_closes(closes, direction="bull"),
             "consecutive_bear_closes": self._consecutive_closes(closes, direction="bear"),
         }
+        breakout_lookback = 6 if label in {"1m", "2m", "3m"} else 5
+        summary[f"breakout_above_prior_high_{breakout_lookback}_bps"] = self._round(
+            self._breakout_distance(closes, highs, lows, breakout_lookback, direction="bull")
+        )
+        summary[f"breakdown_below_prior_low_{breakout_lookback}_bps"] = self._round(
+            self._breakout_distance(closes, highs, lows, breakout_lookback, direction="bear")
+        )
         summary["chop_score"] = self._timeframe_chop_score(summary)
+        summary["long_signal_score"] = self._directional_signal_score(summary, direction="bull", breakout_lookback=breakout_lookback)
+        summary["short_signal_score"] = self._directional_signal_score(summary, direction="bear", breakout_lookback=breakout_lookback)
+        summary["long_breakout_ready"] = self._breakout_ready(summary, direction="bull", breakout_lookback=breakout_lookback)
+        summary["short_breakout_ready"] = self._breakout_ready(summary, direction="bear", breakout_lookback=breakout_lookback)
+        summary["long_continuation_ready"] = self._continuation_ready(summary, direction="bull")
+        summary["short_continuation_ready"] = self._continuation_ready(summary, direction="bear")
         return summary
 
     def _recent_bar_window(self, bars: Sequence[MT5V60Bar], *, limit: int) -> list[dict[str, object]]:
@@ -253,6 +272,59 @@ class MT5V60ContextBuilder:
             "chop_score": chop_score,
         }
 
+    def _entry_signal_payload(
+        self,
+        *,
+        one: dict[str, object],
+        two: dict[str, object],
+        three: dict[str, object],
+        five: dict[str, object],
+    ) -> dict[str, object]:
+        long_alignment_score = self._entry_alignment_score(one=one, two=two, three=three, direction="bull")
+        short_alignment_score = self._entry_alignment_score(one=one, two=two, three=three, direction="bear")
+        long_breakout_alignment = self._entry_breakout_alignment(one=one, two=two, three=three, direction="bull")
+        short_breakout_alignment = self._entry_breakout_alignment(one=one, two=two, three=three, direction="bear")
+        long_continuation_alignment = self._entry_continuation_alignment(one=one, two=two, three=three, direction="bull")
+        short_continuation_alignment = self._entry_continuation_alignment(one=one, two=two, three=three, direction="bear")
+        long_backdrop = self._backdrop_state(five=five, direction="bull")
+        short_backdrop = self._backdrop_state(five=five, direction="bear")
+        return {
+            "long_alignment_score": long_alignment_score,
+            "short_alignment_score": short_alignment_score,
+            "long_breakout_alignment": long_breakout_alignment,
+            "short_breakout_alignment": short_breakout_alignment,
+            "long_continuation_alignment": long_continuation_alignment,
+            "short_continuation_alignment": short_continuation_alignment,
+            "long_fast_entry_ready": (
+                long_alignment_score >= 7
+                and (long_breakout_alignment or long_continuation_alignment)
+                and long_alignment_score >= short_alignment_score + 2
+            ),
+            "short_fast_entry_ready": (
+                short_alignment_score >= 7
+                and (short_breakout_alignment or short_continuation_alignment)
+                and short_alignment_score >= long_alignment_score + 2
+            ),
+            "five_minute_backdrop": {
+                "long": long_backdrop,
+                "short": short_backdrop,
+            },
+            "risk_tier": {
+                "long": self._entry_risk_tier(
+                    alignment_score=long_alignment_score,
+                    breakout_alignment=long_breakout_alignment,
+                    continuation_alignment=long_continuation_alignment,
+                    backdrop_state=long_backdrop,
+                ),
+                "short": self._entry_risk_tier(
+                    alignment_score=short_alignment_score,
+                    breakout_alignment=short_breakout_alignment,
+                    continuation_alignment=short_continuation_alignment,
+                    backdrop_state=short_backdrop,
+                ),
+            },
+        }
+
     def _directional_quality_score(
         self,
         *,
@@ -316,6 +388,89 @@ class MT5V60ContextBuilder:
         if support_return > 0:
             return "continuation"
         return "pullback"
+
+    def _entry_alignment_score(
+        self,
+        *,
+        one: dict[str, object],
+        two: dict[str, object],
+        three: dict[str, object],
+        direction: str,
+    ) -> int:
+        prefix = "long" if direction == "bull" else "short"
+        score = 0
+        for payload, weight in ((one, 2), (two, 3), (three, 4)):
+            signal_score = int(payload.get(f"{prefix}_signal_score", 0))
+            if signal_score >= 7:
+                score += weight
+            elif signal_score >= 5:
+                score += max(weight - 1, 1)
+            if bool(payload.get(f"{prefix}_breakout_ready", False)):
+                score += 1
+            if bool(payload.get(f"{prefix}_continuation_ready", False)):
+                score += 1
+        return score
+
+    def _entry_breakout_alignment(
+        self,
+        *,
+        one: dict[str, object],
+        two: dict[str, object],
+        three: dict[str, object],
+        direction: str,
+    ) -> bool:
+        prefix = "long" if direction == "bull" else "short"
+        return bool(three.get(f"{prefix}_breakout_ready", False)) and bool(
+            two.get(f"{prefix}_breakout_ready", False) or two.get(f"{prefix}_continuation_ready", False)
+        ) and bool(
+            one.get(f"{prefix}_breakout_ready", False) or one.get(f"{prefix}_continuation_ready", False)
+        )
+
+    def _entry_continuation_alignment(
+        self,
+        *,
+        one: dict[str, object],
+        two: dict[str, object],
+        three: dict[str, object],
+        direction: str,
+    ) -> bool:
+        prefix = "long" if direction == "bull" else "short"
+        return bool(three.get(f"{prefix}_continuation_ready", False)) and bool(
+            two.get(f"{prefix}_breakout_ready", False) or two.get(f"{prefix}_continuation_ready", False)
+        ) and bool(
+            one.get(f"{prefix}_breakout_ready", False) or one.get(f"{prefix}_continuation_ready", False)
+        )
+
+    def _backdrop_state(self, *, five: dict[str, object], direction: str) -> str:
+        ema_gap = self._optional_float(five.get("ema_gap_bps"), 0.0)
+        return_3 = self._optional_float(five.get("return_3_bps"), 0.0)
+        if direction == "bull":
+            if ema_gap > 0 and return_3 > 0:
+                return "supportive"
+            if ema_gap < 0 and return_3 < 0:
+                return "opposed"
+            return "neutral"
+        if ema_gap < 0 and return_3 < 0:
+            return "supportive"
+        if ema_gap > 0 and return_3 > 0:
+            return "opposed"
+        return "neutral"
+
+    def _entry_risk_tier(
+        self,
+        *,
+        alignment_score: int,
+        breakout_alignment: bool,
+        continuation_alignment: bool,
+        backdrop_state: str,
+    ) -> str:
+        if alignment_score >= 12 and breakout_alignment and backdrop_state != "opposed":
+            return "full"
+        if alignment_score >= 10 and (breakout_alignment or continuation_alignment):
+            return "reduced"
+        if alignment_score >= 7 and (breakout_alignment or continuation_alignment):
+            return "probe"
+        return "none"
 
     def _ticket_payload(self, *, ticket: MT5V60TicketRecord, allowed_actions: list[str], spread_bps: float | None) -> dict[str, object]:
         current_reward_to_tp_r: float | None = None
@@ -450,6 +605,148 @@ class MT5V60ContextBuilder:
         if str(summary.get("direction")) == "flat":
             score += 1
         return score
+
+    def _breakout_distance(
+        self,
+        closes: Sequence[float],
+        highs: Sequence[float],
+        lows: Sequence[float],
+        lookback: int,
+        *,
+        direction: str,
+    ) -> float:
+        if len(closes) < 2:
+            return 0.0
+        effective_lookback = min(max(lookback, 2), len(closes) - 1)
+        current = closes[-1]
+        prior_high = max(highs[-(effective_lookback + 1) : -1])
+        prior_low = min(lows[-(effective_lookback + 1) : -1])
+        if direction == "bull":
+            return self._distance_bps(current, prior_high)
+        return self._distance_bps(prior_low, current)
+
+    def _directional_signal_score(
+        self,
+        summary: dict[str, object],
+        *,
+        direction: str,
+        breakout_lookback: int,
+    ) -> int:
+        score = 0
+        ema_gap = self._optional_float(summary.get("ema_gap_bps"), 0.0)
+        return_1 = self._optional_float(summary.get("return_1_bps"), 0.0)
+        return_3 = self._optional_float(summary.get("return_3_bps"), 0.0)
+        return_5 = self._optional_float(summary.get("return_5_bps"), 0.0)
+        close_range = self._optional_float(summary.get("close_range_position"), 0.5)
+        body_pct = self._optional_float(summary.get("body_pct"), 0.0)
+        range_vs_atr = self._optional_float(summary.get("latest_range_vs_atr"), 0.0)
+        tick_volume_ratio = self._optional_float(summary.get("tick_volume_ratio"), 1.0)
+        breakout_key = (
+            f"breakout_above_prior_high_{breakout_lookback}_bps"
+            if direction == "bull"
+            else f"breakdown_below_prior_low_{breakout_lookback}_bps"
+        )
+        breakout_distance = self._optional_float(summary.get(breakout_key), 0.0)
+        consecutive_closes = int(
+            summary.get("consecutive_bull_closes" if direction == "bull" else "consecutive_bear_closes", 0)
+        )
+
+        if direction == "bull":
+            if ema_gap > 0:
+                score += 2
+            if return_1 > 0:
+                score += 1
+            if return_3 > 0:
+                score += 2
+            if return_5 > 0:
+                score += 1
+            if close_range >= 0.60:
+                score += 1
+        else:
+            if ema_gap < 0:
+                score += 2
+            if return_1 < 0:
+                score += 1
+            if return_3 < 0:
+                score += 2
+            if return_5 < 0:
+                score += 1
+            if close_range <= 0.40:
+                score += 1
+
+        if breakout_distance >= 0:
+            score += 2
+        elif breakout_distance >= -1.2:
+            score += 1
+        if consecutive_closes >= 2:
+            score += 1
+        if consecutive_closes >= 3:
+            score += 1
+        if body_pct >= 0.40:
+            score += 1
+        if range_vs_atr >= 0.22:
+            score += 1
+        if tick_volume_ratio >= 1.05:
+            score += 1
+        return score
+
+    def _breakout_ready(
+        self,
+        summary: dict[str, object],
+        *,
+        direction: str,
+        breakout_lookback: int,
+    ) -> bool:
+        breakout_key = (
+            f"breakout_above_prior_high_{breakout_lookback}_bps"
+            if direction == "bull"
+            else f"breakdown_below_prior_low_{breakout_lookback}_bps"
+        )
+        breakout_distance = self._optional_float(summary.get(breakout_key), -999.0)
+        signal_score = int(summary.get("long_signal_score" if direction == "bull" else "short_signal_score", 0))
+        range_vs_atr = self._optional_float(summary.get("latest_range_vs_atr"), 0.0)
+        body_pct = self._optional_float(summary.get("body_pct"), 0.0)
+        if direction == "bull":
+            momentum_ok = (
+                self._optional_float(summary.get("ema_gap_bps"), 0.0) > 0
+                and self._optional_float(summary.get("return_3_bps"), 0.0) > 0
+            )
+            close_ok = self._optional_float(summary.get("close_range_position"), 0.5) >= 0.60
+        else:
+            momentum_ok = (
+                self._optional_float(summary.get("ema_gap_bps"), 0.0) < 0
+                and self._optional_float(summary.get("return_3_bps"), 0.0) < 0
+            )
+            close_ok = self._optional_float(summary.get("close_range_position"), 0.5) <= 0.40
+        return (
+            signal_score >= 8
+            and momentum_ok
+            and close_ok
+            and body_pct >= 0.40
+            and range_vs_atr >= 0.22
+            and breakout_distance >= -0.8
+        )
+
+    def _continuation_ready(self, summary: dict[str, object], *, direction: str) -> bool:
+        signal_score = int(summary.get("long_signal_score" if direction == "bull" else "short_signal_score", 0))
+        consecutive_closes = int(
+            summary.get("consecutive_bull_closes" if direction == "bull" else "consecutive_bear_closes", 0)
+        )
+        if direction == "bull":
+            return (
+                signal_score >= 7
+                and consecutive_closes >= 2
+                and self._optional_float(summary.get("ema_gap_bps"), 0.0) > 0
+                and self._optional_float(summary.get("return_3_bps"), 0.0) > 0
+                and self._optional_float(summary.get("close_range_position"), 0.5) >= 0.55
+            )
+        return (
+            signal_score >= 7
+            and consecutive_closes >= 2
+            and self._optional_float(summary.get("ema_gap_bps"), 0.0) < 0
+            and self._optional_float(summary.get("return_3_bps"), 0.0) < 0
+            and self._optional_float(summary.get("close_range_position"), 0.5) <= 0.45
+        )
 
     def _ema(self, values: Sequence[float], period: int) -> float:
         if not values:

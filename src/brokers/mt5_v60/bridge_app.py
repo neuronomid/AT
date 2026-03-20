@@ -51,8 +51,8 @@ def create_mt5_v60_bridge_app(
         return {"status": "ok", "pending_command_count": normalized.health.pending_command_count}
 
     @app.get("/bridge/commands", response_model=MT5V60BridgeCommandPollResponse)
-    async def poll_commands(limit: int = 10) -> MT5V60BridgeCommandPollResponse:
-        commands = await state.poll_commands(limit=limit)
+    async def poll_commands(limit: int = 10, symbol: str | None = None) -> MT5V60BridgeCommandPollResponse:
+        commands = await state.poll_commands(limit=limit, symbol=symbol)
         if commands and journal is not None:
             for command in commands:
                 journal.record({"record_type": "mt5_v60_bridge_command_polled", "agent_name": agent_name, "command": command.model_dump(mode="json")})

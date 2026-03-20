@@ -92,6 +92,8 @@ def test_mt5_v60_context_packet_uses_v6_timeframes() -> None:
     assert "account" not in packet
     assert "risk_posture" not in packet
     assert "feedback" not in packet
+    assert packet["entry_signals"]["long_alignment_score"] > packet["entry_signals"]["short_alignment_score"]
+    assert packet["entry_signals"]["risk_tier"]["long"] in {"full", "reduced", "probe"}
     assert "recent_outcomes" not in str(packet)
     assert "recent_lesson_tags" not in str(packet)
     assert "bid_drift_bps_10s" not in packet["microstructure"]
