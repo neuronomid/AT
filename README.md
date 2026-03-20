@@ -1,168 +1,378 @@
 # AT
 
-AT is a research-phase autonomous trading system. The repository combines:
+AT is an MT5-bridge trading research system.
 
-- an Alpaca `ETH/USD` paper-trading baseline
-- offline backtesting, replay, review, refinement, and discovery workflows
-- a v4 Alpaca paper runtime with LLM-assisted decisions
-- several MT5 bridge runtimes for demo/shadow trading research
-- a Supabase-backed control plane with a FastAPI API and React operator dashboard
+The center of this repository is no longer the old Alpaca loop. The main runtime family is now:
 
-The code is built around one idea: models can analyze and recommend, but deterministic risk and execution code decides what is allowed to happen.
+- V5 MT5 on `EURUSD`
+- V5.1 MT5 on `BTCUSD`
+- V6.0 MT5 on `EURUSD@`
+- V6.1 MT5 multi-symbol on the V6 bridge stack
+
+The shared design is consistent across versions:
+
+- MT5 and Python are separated by a local bridge
+- models analyze and recommend
+- deterministic risk and execution code decides what is allowed
+- every snapshot, command, acknowledgement, and trade outcome should be auditable
 
 ## What This Project Is
 
-- Research-first, not production live trading.
-- Paper trading, demo trading, shadow mode, and offline evaluation come before any real-money path.
-- Multiple runtime tracks live in the same repo, but they are intentionally separated by broker, symbol, and execution model.
-- Auditability matters more than cleverness. Decisions, orders, bridge commands, acknowledgements, and reflections are all meant to be logged.
+- A research-phase orchestration system for MT5 demo, paper, and shadow trading
+- A set of bounded runtime versions, not one monolithic agent
+- A local operator stack with Supabase, FastAPI, and React for control-plane and review work
+- A codebase where execution safety lives in Python code, not in prompts
 
-## Runtime Tracks
+## The Core Mental Model
 
-| Track | Entry point | Purpose |
-| --- | --- | --- |
-| Alpaca baseline | `at-agent` | Baseline `ETH/USD` paper-trading loop using deterministic analyst/risk/execution services. |
-| Historical backtesting | `at-agent-backtest` | Walk-forward backtests against Alpaca historical data and stored policy versions. |
-| Journal review | `at-agent-review` | Summarizes journaled runtime records into lessons and a review report. |
-| Candidate evaluation | `at-agent-evaluate` | Replays journal records and compares baseline vs challenger logic. |
-| Strategy advisor | `at-agent-strategy-review` | Uses an LLM to review backtest and journal outputs and propose improvements. |
-| Strategy refinement cycle | `at-agent-strategy-cycle` | Iterative offline policy refinement loop for Alpaca research. |
-| Discovery cycle | `at-agent-discovery-cycle` | Discovery-first research loop that mines patterns from history before backtesting them. |
-| v4 Alpaca live-paper runtime | `at-agent-v4-live` | LLM-assisted paper runtime with candle/context packets, deterministic risk, and review artifacts. |
-| v5 MT5 runtime | `at-agent-v5-mt5` | Original MT5 bridge orchestrator for `EURUSD`. |
-| v5.1 MT5 runtime | `at-agent-v5-1-mt5` | MT5 `BTCUSD` runtime using OpenRouter-backed entry/manager agents. |
-| v6.0 MT5 runtime | `at-agent-v6-0-mt5` | Newer MT5 runtime with richer context, ticket registry, and screenshot-aware management. |
-| v6.1 MT5 runtime | `at-agent-v6-1-mt5` | Multi-symbol extension of the v6.0 MT5 runtime. |
-| Dashboard API | `at-agent-dashboard-api` | FastAPI control-plane and dashboard backend. |
-| Legacy dashboard | `at-agent-dashboard` | Streamlit prototype kept for compatibility. |
+This repo is easiest to understand if you think in four layers:
 
-## Architecture In One Pass
+1. MT5 terminal + EA
+   The Expert Advisor running inside MetaTrader 5 sees broker prices, open tickets, chart data, and screenshots.
+2. Local bridge
+   A versioned FastAPI bridge receives snapshots from MT5, queues commands for MT5, and records acknowledgements.
+3. Python runtime
+   The runtime builds context, asks entry and manager agents for structured decisions, runs deterministic risk checks, and turns approved actions into bridge commands.
+4. Memory and control plane
+   Journals, Supabase stores, reflections, lessons, policies, backtests, and the dashboard sit here.
 
-Most runtime tracks follow the same shape:
+## What “MT5 Bridge” Means In This Repo
 
-1. Broker or bridge adapters ingest live or historical market/account state.
-2. Typed schemas normalize that state into runtime packets.
-3. Analyst agents produce structured decisions.
-4. Deterministic risk policy approves, sizes, or vetoes those decisions.
-5. Execution code turns approved decisions into orders or MT5 bridge commands.
-6. Journals, reflections, lessons, and database records capture what happened.
-7. Offline review, backtesting, and the dashboard use those records to compare and promote strategy versions.
+The Python runtime does not directly place MT5 orders through a native terminal API.
+Instead, each runtime uses a local HTTP bridge with the same high-level loop:
 
-The important design boundary is that analysis is advisory. Execution safety lives in code under `src/risk/` and `src/execution/`.
+1. An MT5 EA in `ops/mt5/` runs on a chart.
+2. On each timer tick, the EA posts a snapshot to `/bridge/snapshot`.
+3. The Python runtime consumes that snapshot through a versioned bridge state object.
+4. If the runtime wants to act, it queues a command in bridge state.
+5. The EA polls `/bridge/commands`.
+6. MT5 executes the command inside the terminal.
+7. The EA posts an acknowledgement to `/bridge/acks`.
+8. The runtime reconciles ticket state, logs the event, and updates reflections/lessons.
 
-## How The Codebase Is Organized
+Shared bridge endpoints:
 
-```text
-src/
-  app/            CLI entry points and runtime orchestration
-  agents/         Analyst, reviewer, strategy, and MT5 manager agents
-  brokers/        Alpaca services and MT5 bridge apps/state
-  control_plane/  Agent configs, policy versions, promotions, backtest jobs
-  data/           Pydantic schemas and feature inputs
-  evaluation/     Backtest, replay, challenger, refinement, and reporting logic
-  execution/      Order managers, ticket registries, planners, and executors
-  feedback/       Trade reflection and lesson extraction
-  infra/          Logging, metrics, OpenAI/OpenRouter wrappers, scheduler
-  memory/         Journal files plus Supabase/Postgres stores
-  research/       Discovery-first research workflows and report rendering
-  risk/           Deterministic risk policies for Alpaca and MT5 tracks
-  runtime/        Context packet builders, candle builders, quote tapes
-  dashboard_api/  FastAPI backend for the operator dashboard
-  dashboard/      Legacy Streamlit dashboard
+- `POST /bridge/snapshot`
+- `GET /bridge/commands`
+- `POST /bridge/acks`
+- `GET /bridge/health`
 
-frontend/         React + Vite operator UI
-supabase/         Supabase config and SQL migrations
-scripts/          Helper launch scripts
-strategies/       Human-readable strategy notes by version
-docs/             Design and planning documents
-var/              Runtime artifacts, journals, reports, and experiment output
-tests/            Unit tests
-```
+Bridge implementations:
 
-## If You Are New, Read The Code In This Order
-
-1. `src/app/`
-   Start with the entry point for the runtime you care about. This is where dependencies are wired together.
-2. `src/app/config.py`, `src/app/v5_1_config.py`, `src/app/v6_0_config.py`, `src/app/v6_1_config.py`
-   These show the actual environment surface and defaults for each track.
-3. `src/data/`
-   The schemas define the contract between brokers, agents, risk, execution, and storage.
-4. `src/brokers/` and `src/runtime/`
-   These files explain how live inputs become normalized context.
-5. `src/agents/`
-   Advisory logic lives here.
-6. `src/risk/`
-   Hard rules live here. This is the first place to look if you want to understand safety boundaries.
-7. `src/execution/`
-   Order placement, MT5 bridge commands, ticket registries, and position handling live here.
-8. `src/memory/`, `src/control_plane/`, `src/evaluation/`, `src/feedback/`
-   These power persistence, backtests, promotions, reflections, and the dashboard.
-9. `src/dashboard_api/app.py` and `frontend/src/App.tsx`
-   Read these if you want the operator/control-plane path.
-
-## Track-Specific Code Map
-
-### Alpaca baseline and research
-
-- `src/app/main.py`
-- `src/brokers/alpaca/`
-- `src/agents/analyst.py`
-- `src/risk/policy.py`
-- `src/execution/executor.py`
-- `src/evaluation/`
-
-This is the original `ETH/USD` paper-trading and offline-research path. It also feeds the backtest, replay, evaluation, review, and strategy-cycle tooling.
-
-### v4 Alpaca live-paper runtime
-
-- `src/app/v4_live.py`
-- `src/agents/llm_live_analyst.py`
-- `src/risk/v4_policy.py`
-- `src/runtime/candle_builder.py`
-- `src/runtime/context_packet.py`
-- `src/execution/position_tracker.py`
-
-This is the LLM-assisted Alpaca runtime. It still relies on deterministic risk and produces session artifacts under `var/v4/`.
-
-### v5 MT5 runtime
-
-- `src/app/v5_mt5.py`
 - `src/brokers/mt5/`
-- `src/agents/mt5_entry_analyst.py`
-- `src/agents/mt5_position_manager.py`
-- `src/risk/mt5_v5_policy.py`
-- `src/execution/mt5_entry_planner.py`
-- `src/execution/mt5_ticket_book.py`
-
-This is the older MT5 `EURUSD` bridge track.
-
-### v5.1 MT5 runtime
-
-- `src/app/v5_1_mt5.py`
-- `src/app/v5_1_config.py`
 - `src/brokers/mt5_v51/`
-- `src/data/mt5_v51_schemas.py`
-- `src/runtime/mt5_v51_context_packet.py`
-- `src/runtime/mt5_v51_microbars.py`
-- `src/execution/mt5_v51_entry_planner.py`
-- `src/execution/mt5_v51_ticket_registry.py`
-- `src/risk/mt5_v51_policy.py`
-
-This is the BTCUSD MT5 path. It uses OpenRouter settings, finer-grained microbar logic, and a dedicated Supabase store.
-
-### v6.0 and v6.1 MT5 runtimes
-
-- `src/app/v6_0_mt5.py`
-- `src/app/v6_1_mt5.py`
-- `src/app/v6_0_config.py`
-- `src/app/v6_1_config.py`
 - `src/brokers/mt5_v60/`
-- `src/data/mt5_v60_schemas.py`
+
+Bridge EAs:
+
+- `ops/mt5/V5BridgeEA.mq5`
+- `ops/mt5/V51BridgeEA.mq5`
+- `ops/mt5/V60BridgeEA.mq5`
+- `ops/mt5/V61BridgeEA.mq5`
+
+## Version Matrix
+
+| Version | Symbol / scope | Main execution view | Model path | Entry logic | Open-position management |
+| --- | --- | --- | --- | --- | --- |
+| V5 | `EURUSD` | 5m entry, 15m/4h context | OpenAI-compatible | LLM entry analyst | LLM manager with constrained actions |
+| V5.1 | `BTCUSD` | 1m scalp with synthetic 20s microbars | OpenRouter | LLM entry analyst plus deterministic fast-entry override | Deterministic protection and auto-scalp management |
+| V6.0 | `EURUSD@` | 3m execution, 1m/2m support, screenshot-aware | OpenAI Responses | Multimodal LLM analyzer plus deterministic fast breakout | Deterministic scalp guard plus multimodal manager |
+| V6.1 | dynamic multi-symbol | Same as V6.0, per symbol | OpenAI Responses | Reuses V6.0 entry paths per symbol | Reuses V6.0 management paths per symbol |
+
+## Shared MT5 Building Blocks
+
+### Bridge state
+
+Each version has a bridge state class that tracks:
+
+- the latest snapshot
+- pending commands
+- inflight commands for newer versions
+- recent acknowledgements
+- bridge health
+
+Files:
+
+- `src/brokers/mt5/bridge_state.py`
+- `src/brokers/mt5_v51/bridge_state.py`
+- `src/brokers/mt5_v60/bridge_state.py`
+
+The bridge evolves across versions:
+
+- V5 keeps a simple pending-command queue.
+- V5.1 adds explicit inflight command tracking.
+- V6 adds per-symbol latest snapshots and symbol-filtered command polling.
+
+### Context builders
+
+Context builders turn raw snapshots into the packets that the agents actually read.
+
+Files:
+
+- `src/runtime/mt5_context_packet.py`
+- `src/runtime/mt5_v51_context_packet.py`
 - `src/runtime/mt5_v60_context_packet.py`
-- `src/execution/mt5_v60_*`
+
+These are some of the most important files in the repo because they decide what the agents can see.
+
+### Risk arbiters
+
+The model never gets to trade on its own. Risk arbiters gate every entry.
+
+Files:
+
+- `src/risk/mt5_v5_policy.py`
+- `src/risk/mt5_v51_policy.py`
 - `src/risk/mt5_v60_policy.py`
 
-These are the newest MT5 tracks. v6.0 is a single-symbol runtime with richer context and screenshot-aware management. v6.1 reuses much of that machinery for dynamic multi-symbol handling.
+They enforce things like:
+
+- snapshot freshness
+- spread gates
+- confidence floors
+- trade frequency limits
+- daily loss kill switches
+- pending-command protection
+- duplicate-entry protection
+- account-mode and symbol checks
+
+### Execution planners and registries
+
+Execution code translates approved decisions into MT5 bridge commands and tracks what happened afterward.
+
+Files:
+
+- `src/execution/mt5_entry_planner.py`
+- `src/execution/mt5_v51_entry_planner.py`
+- `src/execution/mt5_v60_entry_planner.py`
+- `src/execution/mt5_v60_immediate_entry.py`
+- `src/execution/mt5_ticket_book.py`
+- `src/execution/mt5_v51_ticket_registry.py`
+- `src/execution/mt5_v60_ticket_registry.py`
+
+### Reflections and lessons
+
+Closed tickets become structured reflections, then recurring lessons.
+
+Files:
+
+- `src/feedback/reflection.py`
+- `src/feedback/mt5_v51_reflection.py`
+- `src/feedback/mt5_v60_reflection.py`
+
+## Agents
+
+The runtime versions use different agent shapes.
+
+### V5 agents
+
+- Entry analyst: `src/agents/mt5_entry_analyst.py`
+- Position manager: `src/agents/mt5_position_manager.py`
+
+The entry analyst decides `enter_long`, `enter_short`, or `hold`.
+The manager is restricted to actions like:
+
+- `hold`
+- `take_partial_50`
+- `move_stop_to_breakeven`
+- `trail_stop_to_rule`
+- `close_ticket`
+
+### V5.1 agents
+
+- Entry analyst: `src/agents/mt5_v51_entry_analyst.py`
+- Optional manager class exists: `src/agents/mt5_v51_position_manager.py`
+
+The important implementation detail is that the current V5.1 runtime in `src/app/v5_1_mt5.py` does not rely on the LLM manager in its main loop. Open-trade handling is mostly deterministic:
+
+- async entry analysis harvesting
+- deterministic fast intrabar override
+- automatic protection attachment
+- registry-driven partials and stop moves
+
+### V6.0 and V6.1 agents
+
+- Entry analyzer: `src/agents/mt5_v60_entry_analyst.py`
+- Manager: `src/agents/mt5_v60_position_manager.py`
+
+These are multimodal agents on the V6 stack:
+
+- the entry analyzer can use both numeric context and a chart screenshot
+- the manager can also receive a fresh screenshot and return a `visual_context_update`
+
+V6 differs from V5/V5.1 in one major way: the entry analyzer returns internal stop-loss and take-profit anchors, but the live entry itself can still be sent without broker-side TP/SL. The runtime then attaches and reviews protection after the fill.
+
+## Workflow By Version
+
+### V5 workflow
+
+Main files:
+
+- `src/app/v5_mt5.py`
+- `ops/mt5/V5BridgeEA.mq5`
+- `src/brokers/mt5/`
+
+What happens:
+
+1. The EA publishes a snapshot with bid/ask, 5m/15m/4h bars, account state, and open tickets.
+2. The runtime syncs the in-memory `MT5TicketBook`.
+3. On a new 5m bar, the entry analyst receives an entry packet from `MT5ContextBuilder`.
+4. `MT5V5RiskArbiter` checks freshness, spread, pending commands, daily loss, same-direction limits, and basket risk.
+5. `MT5EntryPlanner` converts approved entries into `place_entry` bridge commands.
+6. If shadow mode is off, the bridge queues the command and the EA later executes it.
+7. When there are open tickets, the position manager receives a constrained manager packet and can request partials, stop moves, or exits.
+8. Ticket closures create reflections and lessons.
+
+How to think about V5:
+
+- the original MT5 version
+- one entry agent and one manager agent
+- simpler ticket tracking than later versions
+- 5m bar rhythm, not the faster intrabar style of V5.1
+
+### V5.1 workflow
+
+Main files:
+
+- `src/app/v5_1_mt5.py`
+- `ops/mt5/V51BridgeEA.mq5`
+- `src/brokers/mt5_v51/`
+- `src/runtime/mt5_v51_microbars.py`
+- `src/execution/mt5_v51_ticket_registry.py`
+
+What changes relative to V5:
+
+- symbol changes to `BTCUSD`
+- execution becomes a faster 1m scalp system
+- the runtime synthesizes 20-second microbars from live snapshots
+- entry analysis and execution are more decoupled
+
+What happens:
+
+1. The EA publishes a snapshot for `BTCUSD`.
+2. The runtime enriches the snapshot with synthetic 20s microbars and updates `MT5V51ContextBuilder`.
+3. On each new 1m bar, the runtime launches an async LLM entry analysis task.
+4. Completed analysis tasks are harvested later and re-checked against current freshness before execution.
+5. On live snapshot updates, a deterministic fast-entry override can fire before the slower LLM path finishes.
+6. `MT5V51RiskArbiter` checks confidence, freshness, spread, trade budget, daily loss, and pending commands.
+7. `MT5V51EntryPlanner` builds the bridge command and `MT5V51TicketRegistry` stores the pending entry plan.
+8. After fills, the registry tracks setup-quality-aware partial targets and stop management.
+9. The runtime runs deterministic post-entry logic:
+   - attach first protection if needed
+   - auto-scalp partials
+   - ratchet stop loss without moving backward
+10. Closed tickets become V5.1 reflections and lessons.
+
+How to think about V5.1:
+
+- fast BTC scalp runtime
+- OpenRouter entry model
+- async analysis plus deterministic override
+- registry-centric management rather than an LLM manager in the main loop
+
+### V6.0 workflow
+
+Main files:
+
+- `src/app/v6_0_mt5.py`
+- `ops/mt5/V60BridgeEA.mq5`
+- `src/brokers/mt5_v60/`
+- `src/runtime/mt5_v60_context_packet.py`
+- `src/execution/mt5_v60_immediate_entry.py`
+
+What changes relative to V5.1:
+
+- execution frame moves to 3m, with 1m and 2m as support
+- snapshots include chart screenshot state and recent close events
+- the entry and manager agents are multimodal
+- entry protection is intentionally staged after naked fills
+
+What happens:
+
+1. The EA captures a chart screenshot on its own interval, then publishes a snapshot with:
+   - 1m, 2m, 3m, and 5m bars
+   - account state
+   - open tickets
+   - screenshot metadata
+   - recent close events
+2. The runtime updates `MT5V60BridgeState`, `MT5V60ContextBuilder`, and screenshot state.
+3. Acknowledgements are drained and applied to `MT5V60TicketRegistry`.
+4. Closed tickets generate reflections and lessons.
+5. If there is no open position, entry can come from:
+   - deterministic fast breakout logic
+   - standard multimodal LLM entry
+   - stop-loss reversal entry after a stopped trade
+6. `MT5V60RiskArbiter` approves or vetoes the decision.
+7. `MT5V60ImmediateEntryBuilder` turns the decision into an immediate entry command and plan payload.
+8. After fills, the runtime may auto-attach first protection if the position is still naked.
+9. Before the manager runs, deterministic scalp-guard rules can partially close or tighten stops on their own.
+10. The multimodal manager then reviews open trades, optionally using a fresh screenshot, and can modify protection, reduce size, or exit.
+
+How to think about V6.0:
+
+- multimodal MT5 runtime
+- stronger separation between entry analysis, immediate entry building, and later protection placement
+- deterministic management rules run before the LLM manager
+
+### V6.1 workflow
+
+Main files:
+
+- `src/app/v6_1_mt5.py`
+- `ops/mt5/V61BridgeEA.mq5`
+- `src/brokers/mt5_v60/`
+
+V6.1 is not a brand-new stack. It is a multi-symbol orchestration layer built on top of the V6.0 bridge, agents, risk, and execution logic.
+
+What happens:
+
+1. The bridge stores the latest snapshot per symbol.
+2. The runtime maintains per-symbol state:
+   - risk arbiter
+   - reflections
+   - lessons
+   - context builder
+   - screenshot state
+   - last entry bar
+   - last manager run
+3. When a snapshot arrives, the updated symbol is prioritized.
+4. For each symbol, the runtime reuses the V6.0 helper flows:
+   - ack processing
+   - registry sync
+   - stop-loss reversal entry
+   - fast entry
+   - standard entry
+   - entry protection
+   - deterministic management
+   - manager sweep
+5. Shutdown flattening can close remaining tickets across all symbols when the session ends and shadow mode is off.
+
+How to think about V6.1:
+
+- V6.0 logic, lifted to symbol-scoped runtime state
+- same agents, same bridge protocol family, broader orchestration
+
+## MT5-Focused Code Map
+
+```text
+ops/mt5/                 Expert Advisors that run inside MetaTrader 5
+src/app/v5_mt5.py        V5 runtime
+src/app/v5_1_mt5.py      V5.1 runtime
+src/app/v6_0_mt5.py      V6.0 runtime
+src/app/v6_1_mt5.py      V6.1 runtime
+src/app/config.py        Shared settings, including V5 MT5 settings
+src/app/v5_1_config.py   V5.1 settings
+src/app/v6_0_config.py   V6.0 settings
+src/app/v6_1_config.py   V6.1 settings
+src/brokers/mt5*/        Bridge apps and bridge state
+src/agents/mt5*.py       Entry and manager agents
+src/data/mt5*_schemas.py Versioned MT5 payload schemas
+src/runtime/mt5*.py      Context builders, quote tapes, microbars, symbol helpers
+src/risk/mt5*.py         Deterministic MT5 risk logic
+src/execution/mt5*.py    Entry planners, immediate entry builders, ticket registries
+src/feedback/mt5*.py     Trade reflection and lesson extraction
+src/memory/supabase_mt5* Versioned MT5 persistence stores
+```
 
 ## Getting Started
 
@@ -175,98 +385,50 @@ pip install -e '.[dev]'
 npm --prefix frontend install
 ```
 
-### 2. Create your local environment file
+### 2. Create `.env`
 
 ```bash
 cp .env.example .env
 ```
 
-Then fill in only the credentials and settings for the track you want to run.
+Then fill in only the variables for the runtime you want to use.
 
-### 3. Optional: set up Supabase for the control plane
+Important config files:
 
-This repo expects database work to go through the Supabase CLI, not ad hoc SQL changes.
+- `src/app/config.py`
+- `src/app/v5_1_config.py`
+- `src/app/v6_0_config.py`
+- `src/app/v6_1_config.py`
 
-Useful files:
+Important note:
 
-- `supabase/config.toml`
-- `supabase/migrations/`
-- `src/memory/supabase.py`
-- `src/memory/supabase_mt5_v51.py`
-- `src/memory/supabase_mt5_v60.py`
+- V5 reads its MT5 settings from `src/app/config.py` via `MT5_*` variables.
+- `.env.example` covers the baseline shared settings and the V5.1 `V51_*` variables.
+- The V5 `MT5_*` variables are not listed in `.env.example`, so check `src/app/config.py` before running V5.
+- V6.0 and V6.1 also use `V60_*` and `V61_*` variables defined in their config modules.
+- Read those config files before running the V6 runtimes.
 
-Typical local workflow:
+### 3. Install the EA in MT5
 
-```bash
-supabase start
-supabase db reset
-```
+The bridge EAs live in `ops/mt5/`.
 
-Typical linked-project workflow:
+Use the matching EA for the runtime you want:
 
-```bash
-supabase link
-supabase db push
-```
+- V5: `ops/mt5/V5BridgeEA.mq5`
+- V5.1: `ops/mt5/V51BridgeEA.mq5`
+- V6.0: `ops/mt5/V60BridgeEA.mq5`
+- V6.1: `ops/mt5/V61BridgeEA.mq5`
 
-## Environment Variables
+Each EA has its own default local bridge port:
 
-`.env.example` covers the baseline Alpaca flow, common OpenAI settings, v5.1 OpenRouter settings, and Supabase access.
+- V5: `8090`
+- V5.1: `8091`
+- V6.0: `8092`
+- V6.1: `8093`
 
-Important groups:
+### 4. Start the runtime
 
-- Alpaca baseline and v4:
-  `ALPACA_*`, `TRADING_SYMBOL`, `ENABLE_AGENT_ORDERS`, `OPENAI_*`
-- Offline evaluation and reports:
-  `JOURNAL_PATH`, `LESSONS_PATH`, `BACKTEST_*`, `REVIEW_SUMMARY_PATH`, `EVALUATION_REPORT_PATH`
-- v5.1 MT5:
-  `V51_*`
-- Supabase:
-  `SUPABASE_*`
-
-Important note about newer MT5 tracks:
-
-- v6.0 and v6.1 read their own settings modules in `src/app/v6_0_config.py` and `src/app/v6_1_config.py`.
-- Those settings use `V60_*` and `V61_*` variables that are not currently listed in `.env.example`.
-- Read those config files before running the v6 tracks.
-
-Important safety note:
-
-- `.env.example` keeps `ENABLE_AGENT_ORDERS=false`.
-- `.env.example` also keeps `V51_MT5_ENABLE_TRADE_COMMANDS=false` and `V51_MT5_SHADOW_MODE=true`.
-- The newer v6 config modules currently default differently, so do not run them blindly without checking their config.
-
-## Common Commands
-
-### Baseline Alpaca loop
-
-```bash
-.venv/bin/at-agent
-```
-
-### Backtest, review, and evaluation
-
-```bash
-.venv/bin/at-agent-backtest --run-name ethusd-walk-forward
-.venv/bin/at-agent-review
-.venv/bin/at-agent-evaluate
-.venv/bin/at-agent-strategy-review
-```
-
-### Strategy and discovery research
-
-```bash
-.venv/bin/at-agent-strategy-cycle
-.venv/bin/at-agent-discovery-cycle
-```
-
-### v4 Alpaca paper runtime
-
-```bash
-.venv/bin/at-agent-v4-live --duration-minutes 60
-```
-
-### MT5 runtimes
+Recommended commands:
 
 ```bash
 .venv/bin/at-agent-v5-mt5 --duration-minutes 60
@@ -275,71 +437,69 @@ scripts/run_v6_0_mt5.sh --duration-minutes 60 --shadow-mode
 scripts/run_v6_1_mt5.sh --duration-minutes 60 --shadow-mode
 ```
 
-Notes:
+Safety notes:
 
-- `scripts/run_v5_mt5.sh` always adds `--enable-trade-commands`, so use the CLI entry point directly if you want to keep that runtime in a safer non-command path.
-- MT5 tracks depend on the local bridge/EA side being installed and pointed at the matching host and port.
+- V5.1 defaults to shadow mode in config.
+- V6.0 and V6.1 config defaults are more execution-ready, so pass `--shadow-mode` unless you intentionally want command execution.
+- `scripts/run_v5_mt5.sh` forces `--enable-trade-commands`, so avoid that helper if you want a safer non-command V5 session.
 
-## Dashboard
+## Dashboard And Control Plane
 
-Primary dashboard path:
+The dashboard is still useful even though the repo is MT5-first.
+
+Primary path:
 
 - backend: `src/dashboard_api/app.py`
 - frontend: `frontend/`
 - database: Supabase/Postgres
 
-Recommended local startup:
+Run it with:
 
 ```bash
 .venv/bin/at-agent-dashboard-api
 npm --prefix frontend run dev -- --host 127.0.0.1 --port 5173
 ```
 
-Legacy Streamlit dashboard:
+Relevant control-plane code:
 
-```bash
-.venv/bin/at-agent-dashboard
-```
+- `src/control_plane/`
+- `src/memory/supabase.py`
+- `src/memory/supabase_mt5_v51.py`
+- `src/memory/supabase_mt5_v60.py`
+- `supabase/migrations/`
 
-The React app is the intended operator UI. Streamlit is still present, but it is no longer the main path for new dashboard work.
+The dashboard and database are where you inspect:
 
-## What Gets Stored Where
-
-- Local journals and reports:
-  `var/`
-- Session-specific runtime artifacts:
-  `var/v4/`, `var/v5/`, `var/v5_1/`, `var/v6_0/`, `var/v6_1/`
-- Strategy-cycle and discovery artifacts:
-  `var/strategy_cycles/`, `var/research/`
-- Database-backed structured memory:
-  agent configs, policy versions, heartbeats, decisions, orders, trade outcomes, lessons, bridge commands, acknowledgements, and backtest jobs/runs
+- agent configs
+- policy versions
+- heartbeats
+- backtest jobs and runs
+- runtime history
+- lessons
+- promotions
 
 ## Testing
 
-Run the unit test suite with:
+Run the unit tests with:
 
 ```bash
 pytest
 ```
 
-Most tests live under `tests/unit/` and are organized by subsystem: Alpaca services, analysts, risk policies, context builders, MT5 runtimes, backtests, and review logic.
+There is broad MT5 coverage under `tests/unit/`, including:
 
-## Extra Documents
+- bridge state
+- context packets
+- entry planners
+- ticket registries
+- risk policies
+- entry agents
+- manager agents
+- V5.1 runtime behavior
+- V6.0 and V6.1 runtime behavior
 
-- `AGENTS.md`
-  Repository operating assumptions and current project direction.
-- `docs/alpaca-eth-agent-plan.md`
-  Original baseline architecture plan.
-- `docs/dashboard.md`
-  Dashboard/control-plane design notes.
-- `docs/hmm-regime-research.md`
-  HMM research notes.
-- `strategies/*.md`
-  Human-readable strategy version notes.
+## Legacy Note
 
-## Practical Caveats
-
-- This repo contains generated and runtime files such as `frontend/node_modules/`, `frontend/dist/`, `var/`, and `__pycache__/`. Those are not the source of truth.
-- The project has evolved from a single Alpaca loop into several bounded runtime tracks. Do not assume the MT5 paths are drop-in replacements for the Alpaca path.
-- If you are changing execution behavior, read the matching config module and risk policy before you touch the agent prompt.
-
+There is still Alpaca and historical research code in the repository, along with earlier dashboard and review tooling.
+It is no longer the main story of the project.
+If you are trying to understand what this repo is for today, start with the MT5 files listed above and treat the Alpaca path as legacy or side-track research.

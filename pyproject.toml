@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "at-agent"
 version = "0.1.0"
-description = "Research-phase Alpaca ETH/USD paper trading agent"
+description = "Research-phase MT5 bridge trading system with dashboard and control plane"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
