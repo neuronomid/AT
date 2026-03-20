@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "at-agent"
 version = "0.1.0"
 description = "Research-phase Alpaca ETH/USD paper trading agent"
-readme = "docs/alpaca-eth-agent-plan.md"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.116.0",
