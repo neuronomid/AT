@@ -1377,7 +1377,24 @@ double SymbolPipSize()
 int DefaultProtectionPoints()
 {
    double point = SymbolPointValue();
-   double distance = MathMax(InpDefaultProtectionPips, 0.1) * SymbolPipSize();
+   double spread = 0.0;
+   if(g_last_ask > 0.0 && g_last_bid > 0.0)
+      spread = MathAbs(g_last_ask - g_last_bid);
+
+   if(spread <= 0.0)
+   {
+      double symbol_bid = SymbolInfoDouble(g_custom_symbol, SYMBOL_BID);
+      double symbol_ask = SymbolInfoDouble(g_custom_symbol, SYMBOL_ASK);
+      if(symbol_ask > 0.0 && symbol_bid > 0.0)
+         spread = MathAbs(symbol_ask - symbol_bid);
+   }
+
+   double distance = 0.0;
+   if(spread > 0.0)
+      distance = spread * 2.0;
+   else
+      distance = MathMax(InpDefaultProtectionPips, 0.1) * SymbolPipSize();
+
    return((int)MathMax(MathRound(distance / point), 1));
 }
 
