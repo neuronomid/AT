@@ -46,6 +46,7 @@ at-agent-v5-mt5 = "app.v5_mt5:main"
 at-agent-v5-1-mt5 = "app.v5_1_mt5:main"
 at-agent-v6-0-mt5 = "app.v6_0_mt5:main"
 at-agent-v6-1-mt5 = "app.v6_1_mt5:main"
+at-agent-mt5-manual-replay = "app.mt5_manual_replay:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

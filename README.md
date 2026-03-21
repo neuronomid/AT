@@ -418,6 +418,7 @@ Use the matching EA for the runtime you want:
 - V5.1: `ops/mt5/V51BridgeEA.mq5`
 - V6.0: `ops/mt5/V60BridgeEA.mq5`
 - V6.1: `ops/mt5/V61BridgeEA.mq5`
+- manual tester replay: `ops/mt5/ATManualReplayTesterEA.mq5`
 
 Each EA has its own default local bridge port:
 
@@ -442,6 +443,57 @@ Safety notes:
 - V5.1 defaults to shadow mode in config.
 - V6.0 and V6.1 config defaults are more execution-ready, so pass `--shadow-mode` unless you intentionally want command execution.
 - `scripts/run_v5_mt5.sh` forces `--enable-trade-commands`, so avoid that helper if you want a safer non-command V5 session.
+
+## Manual Replay In MT5 Strategy Tester
+
+There is now a separate tester-safe path for manual practice trading in visual backtests.
+
+Files:
+
+- tester EA: `ops/mt5/ATManualReplayTesterEA.mq5`
+- controller CLI: `src/app/mt5_manual_replay.py`
+- helper launcher: `scripts/run_mt5_manual_replay.sh`
+
+This path is intentionally separate from the live bridge runtimes:
+
+- it does not use the local HTTP bridge
+- it uses the MT5 `Common/Files` shared folder
+- it is intended for personal replay practice, not unattended runtime execution
+
+Quick start:
+
+```bash
+scripts/run_mt5_manual_replay.sh --session btc-practice-1 init --reset
+scripts/run_mt5_manual_replay.sh --session btc-practice-1 buy 0.10 --sl-points 300 --tp-points 600
+scripts/run_mt5_manual_replay.sh --session btc-practice-1 tail-acks --follow
+```
+
+Full instructions live in `docs/mt5_manual_replay.md`.
+
+## Chart Replay Workspace
+
+There is also a separate normal-chart replay workspace for manual practice that preserves MT5 drawing tools.
+
+File:
+
+- EA: `ops/mt5/ATChartReplayWorkspaceEA.mq5`
+
+This path differs from Strategy Tester replay:
+
+- it runs on a normal chart, not the tester visualizer
+- it creates and updates a custom symbol
+- it keeps MT5 drawing tools available
+- it simulates manual trades on the replay chart
+
+It supports:
+
+- replay from a chosen start time
+- `BAR` stepping
+- `TICK` stepping when historical ticks are available
+- `play`, `pause`, `reset`, and speed controls
+- simulated `BUY`, `SELL`, and `CLOSE`
+
+Usage instructions live in `docs/mt5_chart_replay_workspace.md`.
 
 ## Dashboard And Control Plane
 
