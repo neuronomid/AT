@@ -19,6 +19,7 @@ It creates a custom symbol, seeds historical context before your chosen start po
 - shows a compact corner control panel with replay, order, and position sections
 - keeps the chart as a normal MT5 chart, so native drawing tools still work
 - simulates manual market trades on the replay chart
+- tracks closed trades for the current replay session and can open a separate session report window
 
 ## Current Limits
 
@@ -68,6 +69,7 @@ Then compile it in MT5 MetaEditor.
 - `STEP`: advance one unit in the current mode
 - `RESET`: go back to the selected replay start point
 - `MODE`: switch between `BAR` and `TICK` and reset
+- `REPORT`: opens or refreshes a separate MT5 chart window with the current session report
 - `VOL-`, `VOL+`: decrease or increase the staged lot size for the next trade
 - `S-`, `S+`: slow down or speed up playback
 - `BUY`, `SELL`, `CLOSE`: simulated trade actions

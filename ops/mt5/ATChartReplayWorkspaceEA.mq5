@@ -25,8 +25,8 @@ input int InpPendingEntryOffsetPoints = 120;
 input ENUM_BASE_CORNER InpPanelCorner = CORNER_RIGHT_LOWER;
 input int InpXOffset = 14;
 input int InpYOffset = 18;
-input int InpPanelWidth = 532;
-input int InpPanelHeight = 212;
+input int InpPanelWidth = 572;
+input int InpPanelHeight = 226;
 input string InpUiFont = "Verdana";
 input int InpTitleFontSize = 11;
 input int InpMetaFontSize = 9;
@@ -78,6 +78,43 @@ struct ATSimPendingOrder
    datetime created_at;
 };
 
+struct ATSimClosedTrade
+{
+   int side;
+   double volume_lots;
+   datetime opened_at;
+   datetime closed_at;
+   double entry_price;
+   double exit_price;
+   double stop_loss;
+   double take_profit;
+   double pnl;
+   double balance_after;
+   string exit_reason;
+};
+
+struct ATSessionReportStats
+{
+   int total_trades;
+   int wins;
+   int losses;
+   int long_trades;
+   int short_trades;
+   double gross_profit;
+   double gross_loss;
+   double net_profit;
+   double win_rate;
+   double profit_factor;
+   double avg_win;
+   double avg_loss;
+   double best_trade;
+   double worst_trade;
+   double ending_balance;
+   double current_equity;
+   double peak_balance;
+   double max_drawdown;
+};
+
 struct ATReplaySnapshot
 {
    ATReplayStepMode step_mode;
@@ -87,6 +124,7 @@ struct ATReplaySnapshot
    double last_bid;
    double last_ask;
    double realized_pnl;
+   int closed_trade_count;
    ATSimPosition position;
    ATSimPendingOrder pending_order;
 };
@@ -116,13 +154,16 @@ ATSimPendingOrder g_pending_order = {false, PENDING_NONE, 0.0, 0.0, 0.0, 0.0, 0}
 
 MqlRates g_source_m1[];
 MqlTick g_source_ticks[];
+ATSimClosedTrade g_closed_trades[];
 ATReplaySnapshot g_snapshots[];
 int g_first_replay_m1_index = 0;
 int g_next_m1_index = 0;
 int g_next_tick_index = 0;
 int g_snapshot_count = 0;
 int g_snapshot_cursor = -1;
+int g_closed_trade_count = 0;
 double g_trade_volume_lots = 0.0;
+long g_report_chart_id = 0;
 
 string g_panel_name = "";
 string g_accent_name = "";
@@ -141,6 +182,7 @@ string g_mode_name = "";
 string g_position_name = "";
 string g_volume_name = "";
 string g_hotkeys_name = "";
+string g_report_button_name = "";
 string g_play_button_name = "";
 string g_back_button_name = "";
 string g_step_button_name = "";
@@ -222,6 +264,7 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+   CloseReportChart();
    DeleteInterface();
    DeleteTradeObjects();
    ChartRedraw(g_chart_id);
@@ -317,6 +360,7 @@ void AssignObjectNames()
    g_position_name = BuildObjectName("position");
    g_volume_name = BuildObjectName("volume");
    g_hotkeys_name = BuildObjectName("hotkeys");
+   g_report_button_name = BuildObjectName("report_button");
    g_play_button_name = BuildObjectName("play");
    g_back_button_name = BuildObjectName("back");
    g_step_button_name = BuildObjectName("step");
@@ -650,6 +694,41 @@ bool BuildSyntheticTicksFromM1()
    return(g_using_synthetic_ticks);
 }
 
+long CurrentReplayCursorMsc()
+{
+   if(g_step_mode == REPLAY_MODE_TICK && g_next_tick_index > 0 && (g_next_tick_index - 1) < ArraySize(g_source_ticks))
+      return(g_source_ticks[g_next_tick_index - 1].time_msc);
+   return(((long)g_last_replay_time) * 1000);
+}
+
+int FindFirstTickAfterCursor(const long cursor_msc)
+{
+   int total = ArraySize(g_source_ticks);
+   for(int index = 0; index < total; index++)
+   {
+      if(g_source_ticks[index].time_msc > cursor_msc)
+         return(index);
+   }
+   return(total);
+}
+
+int FindFirstBarAfterMinute(const datetime minute_time)
+{
+   int total = ArraySize(g_source_m1);
+   for(int index = g_first_replay_m1_index; index < total; index++)
+   {
+      if(g_source_m1[index].time > minute_time)
+         return(index);
+   }
+   return(total);
+}
+
+void ResetSessionTrades()
+{
+   g_closed_trade_count = 0;
+   ArrayResize(g_closed_trades, 0);
+}
+
 bool ResetReplayWorkspace(const bool preserve_play_state)
 {
    if(!EnsureCustomReplaySymbol())
@@ -682,6 +761,7 @@ bool ResetReplayWorkspace(const bool preserve_play_state)
    g_realized_pnl = 0.0;
    ResetSimPosition();
    ResetPendingOrder();
+   ResetSessionTrades();
    DeleteTradeObjects();
    SynchronizeQuoteFromCustomHistory();
 
@@ -730,6 +810,7 @@ void CaptureReplaySnapshot()
    snapshot.last_bid = g_last_bid;
    snapshot.last_ask = g_last_ask;
    snapshot.realized_pnl = g_realized_pnl;
+    snapshot.closed_trade_count = g_closed_trade_count;
    snapshot.position = g_position;
    snapshot.pending_order = g_pending_order;
    g_snapshots[g_snapshot_count] = snapshot;
@@ -811,6 +892,7 @@ bool RestoreReplaySnapshot(const ATReplaySnapshot &snapshot)
    g_last_bid = snapshot.last_bid;
    g_last_ask = snapshot.last_ask;
    g_realized_pnl = snapshot.realized_pnl;
+   g_closed_trade_count = snapshot.closed_trade_count;
    g_position = snapshot.position;
    g_pending_order = snapshot.pending_order;
    g_workspace_seeded = true;
@@ -988,6 +1070,11 @@ void UpdateQuoteFromTick(const MqlTick &tick)
 
 void HandleButtonClick(const string name)
 {
+   if(name == g_report_button_name)
+   {
+      OpenSessionReportWindow();
+      return;
+   }
    if(name == g_play_button_name)
    {
       TogglePlayPause();
@@ -1192,10 +1279,37 @@ void StepManually()
 
 void ToggleModeAndReset()
 {
-   g_step_mode = (g_step_mode == REPLAY_MODE_TICK ? REPLAY_MODE_BAR : REPLAY_MODE_TICK);
+   ATReplayStepMode next_mode = (g_step_mode == REPLAY_MODE_TICK ? REPLAY_MODE_BAR : REPLAY_MODE_TICK);
+   if(next_mode == REPLAY_MODE_TICK && ArraySize(g_source_ticks) <= 0)
+   {
+      SetStatus("No tick stream is available for this range. Staying in BAR mode.", InpWarnColor);
+      UpdateInterface();
+      return;
+   }
+
+   if(next_mode == REPLAY_MODE_TICK)
+   {
+      if(g_next_m1_index <= g_first_replay_m1_index)
+         g_next_tick_index = 0;
+      else
+         g_next_tick_index = FindFirstTickAfterCursor(CurrentReplayCursorMsc());
+   }
+   else
+   {
+      if(g_next_tick_index <= 0)
+         g_next_m1_index = g_first_replay_m1_index;
+      else
+         g_next_m1_index = FindFirstBarAfterMinute(FloorToMinute(g_last_replay_time));
+   }
+
+   g_step_mode = next_mode;
    g_is_playing = false;
-   ResetReplayWorkspace(true);
-   string mode_message = (g_step_mode == REPLAY_MODE_TICK ? "Mode set to TICK. Replay reset." : "Mode set to BAR. Replay reset.");
+   CaptureReplaySnapshot();
+   ConfigureChartBehavior();
+   DrawTradeObjects();
+   SynchronizeViewToLatest();
+
+   string mode_message = (g_step_mode == REPLAY_MODE_TICK ? "Mode set to TICK at the current replay point." : "Mode set to BAR at the current replay point.");
    if(g_step_mode == REPLAY_MODE_TICK && g_has_real_ticks)
       mode_message += " Using real ticks.";
    else if(g_step_mode == REPLAY_MODE_TICK && g_using_synthetic_ticks)
@@ -1591,6 +1705,7 @@ void CloseSimPosition(const string reason, const double exit_price)
 
    double pnl = CalculatePositionPnl(exit_price);
    g_realized_pnl += pnl;
+   RecordClosedTrade(reason, exit_price, pnl);
 
    string direction = (g_position.side > 0 ? "LONG" : "SHORT");
    string message = direction + " closed via " + reason + ". pnl=" + DoubleToString(pnl, 2);
@@ -1933,8 +2048,8 @@ bool BuildInterface()
    int row1_y = 88;
    int row2_y = 116;
    int row3_y = 144;
-   int footer_y = 182;
-   int hotkeys_y = 198;
+   int footer_y = 178;
+   int report_y = 202;
    int section_gap = 14;
    int orders_width = 160;
    int stats_width = 182;
@@ -1992,7 +2107,7 @@ bool BuildInterface()
    ok = EnsureButton(g_speed_up_button_name, "S+", ResolveInnerX(replay_x + replay_wide_width + replay_gap), ResolveInnerY(row3_y), replay_wide_width, 22) && ok;
 
    ok = EnsureTextLabel(g_status_name, ResolveInnerX(14), ResolveInnerY(footer_y), InpUiFont, InpMetaFontSize, InpAccentColor) && ok;
-   ok = EnsureTextLabel(g_hotkeys_name, ResolveInnerX(14), ResolveInnerY(hotkeys_y), InpUiFont, InpMetaFontSize, InpMetaColor) && ok;
+   ok = EnsureButton(g_report_button_name, "REPORT", ResolveInnerX(14), ResolveInnerY(report_y), InpPanelWidth - 28, 18) && ok;
 
    return(ok);
 }
@@ -2015,6 +2130,7 @@ void DeleteInterface()
    ObjectDelete(g_chart_id, g_position_name);
    ObjectDelete(g_chart_id, g_volume_name);
    ObjectDelete(g_chart_id, g_hotkeys_name);
+   ObjectDelete(g_chart_id, g_report_button_name);
    ObjectDelete(g_chart_id, g_status_name);
    ObjectDelete(g_chart_id, g_play_button_name);
    ObjectDelete(g_chart_id, g_back_button_name);
@@ -2061,8 +2177,9 @@ void UpdateInterface()
    ObjectSetString(g_chart_id, g_position_name, OBJPROP_TEXT, PositionSummaryText());
    ObjectSetString(g_chart_id, g_balance_name, OBJPROP_TEXT, BalanceSummaryText());
    ObjectSetString(g_chart_id, g_volume_name, OBJPROP_TEXT, "Lots " + VolumeToText(g_trade_volume_lots));
-   ObjectSetString(g_chart_id, g_hotkeys_name, OBJPROP_TEXT, "Space step | Enter play | M mode | R reset | B/S/C trade");
+   ObjectSetString(g_chart_id, g_report_button_name, OBJPROP_TEXT, ReportSummaryText());
 
+   ColorizeButton(g_report_button_name, ReportSummaryButtonColor(), InpTextColor);
    ColorizeButton(g_back_button_name, InpNeutralButtonColor, InpTextColor);
    ColorizeButton(g_play_button_name, g_is_playing ? InpAccentColor : InpNeutralButtonColor, g_is_playing ? InpPanelColor : InpTextColor);
    ColorizeButton(g_step_button_name, InpNeutralButtonColor, InpTextColor);
@@ -2081,6 +2198,7 @@ void UpdateInterface()
    ColorizeButton(g_sell_stop_button_name, InpBadColor, InpTextColor);
 
    DrawTradeObjects();
+   RefreshSessionReportWindow(false);
    ChartRedraw(g_chart_id);
 }
 
@@ -2134,6 +2252,462 @@ string BalanceSummaryText()
       "Bal " + DoubleToString(SimulatedBalanceValue(), 2)
       + " | P/L " + DoubleToString(g_realized_pnl + FloatingPnlValue(), 2)
    );
+}
+
+void RecordClosedTrade(const string reason, const double exit_price, const double pnl)
+{
+   ATSimClosedTrade trade;
+   trade.side = g_position.side;
+   trade.volume_lots = g_position.volume_lots;
+   trade.opened_at = g_position.opened_at;
+   trade.closed_at = g_last_replay_time;
+   trade.entry_price = g_position.entry_price;
+   trade.exit_price = exit_price;
+   trade.stop_loss = g_position.stop_loss;
+   trade.take_profit = g_position.take_profit;
+   trade.pnl = pnl;
+   trade.balance_after = SimulatedBalanceValue();
+   trade.exit_reason = reason;
+
+   if(g_closed_trade_count >= ArraySize(g_closed_trades))
+      ArrayResize(g_closed_trades, g_closed_trade_count + 1);
+   g_closed_trades[g_closed_trade_count] = trade;
+   g_closed_trade_count++;
+}
+
+void ComputeSessionReportStats(ATSessionReportStats &stats)
+{
+   ZeroMemory(stats);
+   stats.ending_balance = SimulatedBalanceValue();
+   stats.current_equity = stats.ending_balance + FloatingPnlValue();
+   stats.peak_balance = g_simulated_balance_start;
+
+   bool has_trade = false;
+   for(int index = 0; index < g_closed_trade_count; index++)
+   {
+      ATSimClosedTrade trade = g_closed_trades[index];
+      stats.total_trades++;
+      if(trade.side > 0)
+         stats.long_trades++;
+      else if(trade.side < 0)
+         stats.short_trades++;
+
+      if(trade.pnl > 0.0)
+      {
+         stats.wins++;
+         stats.gross_profit += trade.pnl;
+      }
+      else if(trade.pnl < 0.0)
+      {
+         stats.losses++;
+         stats.gross_loss += -trade.pnl;
+      }
+
+      if(!has_trade || trade.pnl > stats.best_trade)
+         stats.best_trade = trade.pnl;
+      if(!has_trade || trade.pnl < stats.worst_trade)
+         stats.worst_trade = trade.pnl;
+      has_trade = true;
+
+      if(trade.balance_after > stats.peak_balance)
+         stats.peak_balance = trade.balance_after;
+      double drawdown = stats.peak_balance - trade.balance_after;
+      if(drawdown > stats.max_drawdown)
+         stats.max_drawdown = drawdown;
+   }
+
+   stats.net_profit = g_realized_pnl;
+   if(stats.total_trades > 0)
+      stats.win_rate = (100.0 * stats.wins) / stats.total_trades;
+   if(stats.wins > 0)
+      stats.avg_win = stats.gross_profit / stats.wins;
+   if(stats.losses > 0)
+      stats.avg_loss = stats.gross_loss / stats.losses;
+   if(stats.gross_loss > 0.0)
+      stats.profit_factor = stats.gross_profit / stats.gross_loss;
+}
+
+string SignedMoneyText(const double value)
+{
+   if(value > 0.0)
+      return("+" + DoubleToString(value, 2));
+   return(DoubleToString(value, 2));
+}
+
+string ProfitFactorText(const ATSessionReportStats &stats)
+{
+   if(stats.gross_loss <= 0.0)
+   {
+      if(stats.gross_profit > 0.0)
+         return("INF");
+      return("0.00");
+   }
+   return(DoubleToString(stats.profit_factor, 2));
+}
+
+string ReportSummaryText()
+{
+   ATSessionReportStats stats;
+   ComputeSessionReportStats(stats);
+
+   if(stats.total_trades <= 0)
+      return("REPORT | 0 trades | Net 0.00");
+
+   return(
+      "REPORT | "
+      + IntegerToString(stats.total_trades)
+      + " trades | Win "
+      + DoubleToString(stats.win_rate, 1)
+      + "% | Net "
+      + SignedMoneyText(stats.net_profit)
+   );
+}
+
+color ReportSummaryButtonColor()
+{
+   ATSessionReportStats stats;
+   ComputeSessionReportStats(stats);
+   if(stats.total_trades <= 0)
+      return(InpNeutralButtonColor);
+   return(stats.net_profit >= 0.0 ? InpGoodColor : InpBadColor);
+}
+
+string PadRightText(const string value, const int width)
+{
+   string output = value;
+   while(StringLen(output) < width)
+      output += " ";
+   return(output);
+}
+
+string PadLeftText(const string value, const int width)
+{
+   string output = value;
+   while(StringLen(output) < width)
+      output = " " + output;
+   return(output);
+}
+
+string ShortReportTimeText(const datetime value)
+{
+   return(TimeToString(value, TIME_MINUTES));
+}
+
+string ReportReasonText(const string reason)
+{
+   string label = reason;
+   StringReplace(label, "bar_conflict_stop_first", "bar stop");
+   StringReplace(label, "_", " ");
+   return(label);
+}
+
+bool SessionReportChartIsOpen()
+{
+   if(g_report_chart_id <= 0)
+      return(false);
+
+   string symbol_name = ChartSymbol(g_report_chart_id);
+   if(symbol_name == "")
+   {
+      g_report_chart_id = 0;
+      return(false);
+   }
+
+   return(true);
+}
+
+string ReportObjectName(const string suffix)
+{
+   return(g_prefix + "_report_" + suffix);
+}
+
+void DeleteReportObjects(const long chart_id)
+{
+   if(chart_id <= 0)
+      return;
+
+   ObjectDelete(chart_id, ReportObjectName("background"));
+   ObjectDelete(chart_id, ReportObjectName("accent"));
+   ObjectDelete(chart_id, ReportObjectName("title"));
+   ObjectDelete(chart_id, ReportObjectName("meta"));
+   ObjectDelete(chart_id, ReportObjectName("section"));
+   ObjectDelete(chart_id, ReportObjectName("trade_header"));
+   ObjectDelete(chart_id, ReportObjectName("footer"));
+
+   for(int index = 0; index < 8; index++)
+   {
+      ObjectDelete(chart_id, ReportObjectName("summary_left_" + IntegerToString(index)));
+      ObjectDelete(chart_id, ReportObjectName("summary_right_" + IntegerToString(index)));
+   }
+   for(int index = 0; index < 10; index++)
+      ObjectDelete(chart_id, ReportObjectName("trade_row_" + IntegerToString(index)));
+}
+
+bool EnsureReportRectangle(
+   const long chart_id,
+   const string name,
+   const int x,
+   const int y,
+   const int width,
+   const int height,
+   const color background_color,
+   const color border_color,
+   const int border_width
+)
+{
+   if(ObjectFind(chart_id, name) < 0)
+   {
+      ResetLastError();
+      if(!ObjectCreate(chart_id, name, OBJ_RECTANGLE_LABEL, 0, 0, 0))
+         return(false);
+   }
+
+   bool ok = true;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_CORNER, CORNER_LEFT_UPPER) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_XDISTANCE, x) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_YDISTANCE, y) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_XSIZE, width) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_YSIZE, height) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_BGCOLOR, background_color) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_BORDER_TYPE, BORDER_FLAT) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_COLOR, border_color) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_WIDTH, border_width) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_BACK, false) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_SELECTABLE, false) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_SELECTED, false) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_HIDDEN, false) && ok;
+   return(ok);
+}
+
+bool EnsureReportLabel(
+   const long chart_id,
+   const string name,
+   const string text,
+   const int x,
+   const int y,
+   const string font_name,
+   const int font_size,
+   const color text_color
+)
+{
+   if(ObjectFind(chart_id, name) < 0)
+   {
+      ResetLastError();
+      if(!ObjectCreate(chart_id, name, OBJ_LABEL, 0, 0, 0))
+         return(false);
+   }
+
+   bool ok = true;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_CORNER, CORNER_LEFT_UPPER) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_XDISTANCE, x) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_YDISTANCE, y) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_COLOR, text_color) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_FONTSIZE, font_size) && ok;
+   ok = ObjectSetString(chart_id, name, OBJPROP_FONT, font_name) && ok;
+   ok = ObjectSetString(chart_id, name, OBJPROP_TEXT, text) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_BACK, false) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_SELECTABLE, false) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_SELECTED, false) && ok;
+   ok = ObjectSetInteger(chart_id, name, OBJPROP_HIDDEN, false) && ok;
+   return(ok);
+}
+
+bool EnsureSessionReportChart()
+{
+   if(SessionReportChartIsOpen())
+      return(true);
+
+   g_report_chart_id = ChartOpen(g_custom_symbol, (ENUM_TIMEFRAMES)Period());
+   if(g_report_chart_id <= 0)
+   {
+      SetStatus("Could not open the session report window.", InpWarnColor);
+      return(false);
+   }
+
+   for(int attempt = 0; attempt < 20; attempt++)
+   {
+      if(ChartSymbol(g_report_chart_id) != "")
+         break;
+      Sleep(50);
+   }
+
+   ChartSetInteger(g_report_chart_id, CHART_AUTOSCROLL, false);
+   ChartSetInteger(g_report_chart_id, CHART_SHIFT, false);
+   return(true);
+}
+
+string FormatTradeRowText(const int ordinal, const ATSimClosedTrade &trade)
+{
+   string row = "";
+   row += PadLeftText(IntegerToString(ordinal), 2) + "  ";
+   row += PadRightText(trade.side > 0 ? "LONG" : "SHORT", 5) + "  ";
+   row += PadLeftText(VolumeToText(trade.volume_lots), 4) + "  ";
+   row += PadRightText(ShortReportTimeText(trade.opened_at), 5) + "  ";
+   row += PadRightText(ShortReportTimeText(trade.closed_at), 5) + "  ";
+   row += PadLeftText(PriceToText(trade.entry_price), 10) + "  ";
+   row += PadLeftText(PriceToText(trade.exit_price), 10) + "  ";
+   row += PadLeftText(SignedMoneyText(trade.pnl), 9) + "  ";
+   row += ReportReasonText(trade.exit_reason);
+   return(row);
+}
+
+void RenderSessionReportWindow()
+{
+   if(!SessionReportChartIsOpen())
+      return;
+
+   ATSessionReportStats stats;
+   ComputeSessionReportStats(stats);
+
+   const string title_font = InpUiFont;
+   const string mono_font = "Consolas";
+   const int panel_x = 18;
+   const int panel_y = 18;
+   const int panel_width = 920;
+   const int panel_height = 500;
+   const color panel_bg = clrWhite;
+   const color panel_border = C'198,205,214';
+   const color text_color = C'36,43,52';
+   const color sub_color = C'92,105,122';
+   const color gain_color = C'28,134,88';
+   const color loss_color = C'176,58,72';
+
+   EnsureReportRectangle(g_report_chart_id, ReportObjectName("background"), panel_x, panel_y, panel_width, panel_height, panel_bg, panel_border, 1);
+   EnsureReportRectangle(g_report_chart_id, ReportObjectName("accent"), panel_x, panel_y, panel_width, 4, InpAccentColor, InpAccentColor, 0);
+   EnsureReportLabel(g_report_chart_id, ReportObjectName("title"), "AT Replay Session Report", panel_x + 16, panel_y + 16, title_font, 14, text_color);
+   EnsureReportLabel(
+      g_report_chart_id,
+      ReportObjectName("meta"),
+      g_source_symbol + " -> " + g_custom_symbol + " | " + EnumToString((ENUM_TIMEFRAMES)Period())
+      + " | " + TimeToString(InpReplayStartTime, TIME_DATE | TIME_MINUTES)
+      + " -> " + TimeToString(g_last_replay_time, TIME_DATE | TIME_MINUTES),
+      panel_x + 16,
+      panel_y + 42,
+      mono_font,
+      9,
+      sub_color
+   );
+
+   string left_rows[8];
+   left_rows[0] = "Start Balance  " + DoubleToString(g_simulated_balance_start, 2);
+   left_rows[1] = "End Balance    " + DoubleToString(stats.ending_balance, 2);
+   left_rows[2] = "Current Equity " + DoubleToString(stats.current_equity, 2);
+   left_rows[3] = "Net Profit     " + SignedMoneyText(stats.net_profit);
+   left_rows[4] = "Gross Profit   " + DoubleToString(stats.gross_profit, 2);
+   left_rows[5] = "Gross Loss     " + DoubleToString(stats.gross_loss, 2);
+   left_rows[6] = "Profit Factor  " + ProfitFactorText(stats);
+   left_rows[7] = "Max Drawdown   " + DoubleToString(stats.max_drawdown, 2);
+
+   string right_rows[8];
+   right_rows[0] = "Trades         " + IntegerToString(stats.total_trades);
+   right_rows[1] = "Wins / Losses  " + IntegerToString(stats.wins) + " / " + IntegerToString(stats.losses);
+   right_rows[2] = "Win Rate       " + DoubleToString(stats.win_rate, 1) + "%";
+   right_rows[3] = "Long / Short   " + IntegerToString(stats.long_trades) + " / " + IntegerToString(stats.short_trades);
+   right_rows[4] = "Best Trade     " + SignedMoneyText(stats.best_trade);
+   right_rows[5] = "Worst Trade    " + SignedMoneyText(stats.worst_trade);
+   right_rows[6] = "Avg Win        " + DoubleToString(stats.avg_win, 2);
+   right_rows[7] = "Avg Loss       " + DoubleToString(stats.avg_loss, 2);
+
+   for(int row = 0; row < 8; row++)
+   {
+      EnsureReportLabel(
+         g_report_chart_id,
+         ReportObjectName("summary_left_" + IntegerToString(row)),
+         left_rows[row],
+         panel_x + 16,
+         panel_y + 82 + (row * 18),
+         mono_font,
+         10,
+         (row == 3 && stats.net_profit < 0.0) ? loss_color : text_color
+      );
+      EnsureReportLabel(
+         g_report_chart_id,
+         ReportObjectName("summary_right_" + IntegerToString(row)),
+         right_rows[row],
+         panel_x + 470,
+         panel_y + 82 + (row * 18),
+         mono_font,
+         10,
+         text_color
+      );
+   }
+   EnsureReportLabel(g_report_chart_id, ReportObjectName("section"), "Recent Trades", panel_x + 16, panel_y + 250, title_font, 11, text_color);
+   EnsureReportLabel(
+      g_report_chart_id,
+      ReportObjectName("trade_header"),
+      "#  Side   Lot  Open  Close      Entry       Exit       PnL  Reason",
+      panel_x + 16,
+      panel_y + 278,
+      mono_font,
+      9,
+      sub_color
+   );
+
+   int max_rows = 10;
+   for(int row = 0; row < max_rows; row++)
+   {
+      string object_name = ReportObjectName("trade_row_" + IntegerToString(row));
+      int trade_index = g_closed_trade_count - 1 - row;
+      if(trade_index < 0)
+      {
+         ObjectDelete(g_report_chart_id, object_name);
+         continue;
+      }
+
+      ATSimClosedTrade trade = g_closed_trades[trade_index];
+      EnsureReportLabel(
+         g_report_chart_id,
+         object_name,
+         FormatTradeRowText(trade_index + 1, trade),
+         panel_x + 16,
+         panel_y + 302 + (row * 18),
+         mono_font,
+         9,
+         trade.pnl >= 0.0 ? gain_color : loss_color
+      );
+   }
+
+   string footer =
+      "Open Position: "
+      + (!g_position.open ? "Flat" : PositionSummaryText())
+      + " | Pending: "
+      + (!g_pending_order.active ? "None" : PositionSummaryText());
+   EnsureReportLabel(g_report_chart_id, ReportObjectName("footer"), footer, panel_x + 16, panel_y + panel_height - 26, mono_font, 9, sub_color);
+
+   ChartRedraw(g_report_chart_id);
+}
+
+void RefreshSessionReportWindow(const bool allow_open)
+{
+   if(allow_open)
+   {
+      if(!EnsureSessionReportChart())
+         return;
+   }
+   else if(!SessionReportChartIsOpen())
+   {
+      return;
+   }
+
+   RenderSessionReportWindow();
+}
+
+void OpenSessionReportWindow()
+{
+   RefreshSessionReportWindow(true);
+   SetStatus("Session report updated.", InpAccentColor);
+   ChartRedraw(g_chart_id);
+}
+
+void CloseReportChart()
+{
+   if(!SessionReportChartIsOpen())
+      return;
+
+   DeleteReportObjects(g_report_chart_id);
+   ChartRedraw(g_report_chart_id);
+   ChartClose(g_report_chart_id);
+   g_report_chart_id = 0;
 }
 
 string PriceToText(const double value)
