@@ -3,6 +3,8 @@
 #property description "AT custom-symbol chart replay workspace for manual practice."
 #property description "Uses a normal MT5 chart so native drawing tools remain available."
 
+#include <Canvas\Canvas.mqh>
+
 input string InpWorkspaceId = "replay1";
 input string InpSourceSymbol = "";
 input double InpReplayStartingBalance = 10000.0;
@@ -164,6 +166,7 @@ int g_snapshot_cursor = -1;
 int g_closed_trade_count = 0;
 double g_trade_volume_lots = 0.0;
 long g_report_chart_id = 0;
+CCanvas g_report_graph_canvas;
 
 string g_panel_name = "";
 string g_accent_name = "";
@@ -2426,11 +2429,21 @@ void DeleteReportObjects(const long chart_id)
    if(chart_id <= 0)
       return;
 
+   g_report_graph_canvas.Destroy();
+   ObjectDelete(chart_id, ReportObjectName("graph_canvas"));
    ObjectDelete(chart_id, ReportObjectName("background"));
    ObjectDelete(chart_id, ReportObjectName("accent"));
    ObjectDelete(chart_id, ReportObjectName("title"));
    ObjectDelete(chart_id, ReportObjectName("meta"));
-   ObjectDelete(chart_id, ReportObjectName("section"));
+    ObjectDelete(chart_id, ReportObjectName("section"));
+   ObjectDelete(chart_id, ReportObjectName("stats_box"));
+   ObjectDelete(chart_id, ReportObjectName("graph_box"));
+   ObjectDelete(chart_id, ReportObjectName("graph_title"));
+   ObjectDelete(chart_id, ReportObjectName("graph_note"));
+   ObjectDelete(chart_id, ReportObjectName("graph_min"));
+   ObjectDelete(chart_id, ReportObjectName("graph_max"));
+   ObjectDelete(chart_id, ReportObjectName("graph_current"));
+   ObjectDelete(chart_id, ReportObjectName("trades_box"));
    ObjectDelete(chart_id, ReportObjectName("trade_header"));
    ObjectDelete(chart_id, ReportObjectName("footer"));
 
@@ -2439,8 +2452,14 @@ void DeleteReportObjects(const long chart_id)
       ObjectDelete(chart_id, ReportObjectName("summary_left_" + IntegerToString(index)));
       ObjectDelete(chart_id, ReportObjectName("summary_right_" + IntegerToString(index)));
    }
-   for(int index = 0; index < 10; index++)
+   for(int index = 0; index < 512; index++)
+   {
       ObjectDelete(chart_id, ReportObjectName("trade_row_" + IntegerToString(index)));
+      ObjectDelete(chart_id, ReportObjectName("graph_s_" + IntegerToString(index)));
+      ObjectDelete(chart_id, ReportObjectName("graph_h_" + IntegerToString(index)));
+      ObjectDelete(chart_id, ReportObjectName("graph_v_" + IntegerToString(index)));
+      ObjectDelete(chart_id, ReportObjectName("graph_p_" + IntegerToString(index)));
+   }
 }
 
 bool EnsureReportRectangle(
@@ -2536,6 +2555,168 @@ bool EnsureSessionReportChart()
    return(true);
 }
 
+int ReportChartWidthPixels()
+{
+   if(!SessionReportChartIsOpen())
+      return(1280);
+
+   long width = ChartGetInteger(g_report_chart_id, CHART_WIDTH_IN_PIXELS, 0);
+   if(width <= 0)
+      return(1280);
+   return((int)width);
+}
+
+int ReportChartHeightPixels()
+{
+   if(!SessionReportChartIsOpen())
+      return(720);
+
+   long height = ChartGetInteger(g_report_chart_id, CHART_HEIGHT_IN_PIXELS, 0);
+   if(height <= 0)
+      return(720);
+   return((int)height);
+}
+
+void RenderBalanceGraph(
+   const int graph_x,
+   const int graph_y,
+   const int graph_width,
+   const int graph_height,
+   const color line_color,
+   const color point_color,
+   const color text_color,
+   const color sub_color
+)
+{
+   datetime point_times[];
+   double point_balances[];
+   ArrayResize(point_times, g_closed_trade_count + 2);
+   ArrayResize(point_balances, g_closed_trade_count + 2);
+
+   int point_count = 0;
+   point_times[point_count] = g_replay_start_minute;
+   point_balances[point_count] = g_simulated_balance_start;
+   point_count++;
+
+   for(int index = 0; index < g_closed_trade_count; index++)
+   {
+      point_times[point_count] = g_closed_trades[index].closed_at;
+      point_balances[point_count] = g_closed_trades[index].balance_after;
+      point_count++;
+   }
+
+   double current_balance = g_simulated_balance_start + g_realized_pnl + FloatingPnlValue();
+   if(point_count <= 1 || point_times[point_count - 1] != g_last_replay_time || MathAbs(point_balances[point_count - 1] - current_balance) > 0.0001)
+   {
+      point_times[point_count] = g_last_replay_time;
+      point_balances[point_count] = current_balance;
+      point_count++;
+   }
+
+   if(point_count <= 0)
+      return;
+
+   datetime min_time = point_times[0];
+   datetime max_time = point_times[point_count - 1];
+   double min_balance = point_balances[0];
+   double max_balance = point_balances[0];
+   for(int index = 1; index < point_count; index++)
+   {
+      if(point_times[index] < min_time)
+         min_time = point_times[index];
+      if(point_times[index] > max_time)
+         max_time = point_times[index];
+      if(point_balances[index] < min_balance)
+         min_balance = point_balances[index];
+      if(point_balances[index] > max_balance)
+         max_balance = point_balances[index];
+   }
+
+   if(max_time <= min_time)
+      max_time = min_time + 60;
+   double balance_span = max_balance - min_balance;
+   if(balance_span <= 0.0)
+      balance_span = MathMax(MathAbs(max_balance) * 0.01, 1.0);
+
+   double balance_padding = MathMax(balance_span * 0.12, 1.0);
+   min_balance -= balance_padding;
+   max_balance += balance_padding;
+   balance_span = max_balance - min_balance;
+
+   int inner_left = graph_x + 18;
+   int inner_right = graph_x + graph_width - 18;
+   int inner_top = graph_y + 44;
+   int inner_bottom = graph_y + graph_height - 34;
+   int inner_width = MathMax(inner_right - inner_left, 1);
+   int inner_height = MathMax(inner_bottom - inner_top, 1);
+   int graph_title_y = graph_y + 10;
+   int graph_scale_top_y = graph_y + 26;
+   int graph_footer_y = graph_y + graph_height - 18;
+
+   EnsureReportLabel(g_report_chart_id, ReportObjectName("graph_title"), "Balance Curve", graph_x + 14, graph_title_y, InpUiFont, 11, text_color);
+   EnsureReportLabel(g_report_chart_id, ReportObjectName("graph_note"), "Closed trades plus current equity", graph_x + graph_width - 220, graph_title_y, "Consolas", 9, sub_color);
+   EnsureReportLabel(g_report_chart_id, ReportObjectName("graph_max"), DoubleToString(max_balance, 2), graph_x + 14, graph_scale_top_y, "Consolas", 8, sub_color);
+   EnsureReportLabel(g_report_chart_id, ReportObjectName("graph_min"), DoubleToString(min_balance, 2), graph_x + 14, graph_footer_y, "Consolas", 8, sub_color);
+   EnsureReportLabel(g_report_chart_id, ReportObjectName("graph_current"), "Current " + DoubleToString(current_balance, 2), graph_x + graph_width - 150, graph_footer_y, "Consolas", 8, sub_color);
+
+   int point_xs[];
+   int point_ys[];
+   ArrayResize(point_xs, point_count);
+   ArrayResize(point_ys, point_count);
+
+   for(int index = 0; index < point_count; index++)
+   {
+      double time_ratio = (double)(point_times[index] - min_time) / (double)(max_time - min_time);
+      double balance_ratio = (point_balances[index] - min_balance) / balance_span;
+
+      point_xs[index] = inner_left + (int)MathRound(time_ratio * inner_width);
+      point_ys[index] = inner_bottom - (int)MathRound(balance_ratio * inner_height);
+   }
+
+   for(int index = 0; index < 2048; index++)
+   {
+      ObjectDelete(g_report_chart_id, ReportObjectName("graph_s_" + IntegerToString(index)));
+      ObjectDelete(g_report_chart_id, ReportObjectName("graph_h_" + IntegerToString(index)));
+      ObjectDelete(g_report_chart_id, ReportObjectName("graph_v_" + IntegerToString(index)));
+      ObjectDelete(g_report_chart_id, ReportObjectName("graph_p_" + IntegerToString(index)));
+   }
+
+   string canvas_name = ReportObjectName("graph_canvas");
+   g_report_graph_canvas.Destroy();
+   ObjectDelete(g_report_chart_id, canvas_name);
+   if(!g_report_graph_canvas.CreateBitmapLabel(
+      g_report_chart_id,
+      0,
+      canvas_name,
+      inner_left,
+      inner_top,
+      inner_width + 1,
+      inner_height + 1,
+      COLOR_FORMAT_XRGB_NOALPHA
+   ))
+      return;
+
+   g_report_graph_canvas.Erase(COLOR2RGB(C'246,248,252'));
+
+   for(int index = 1; index < point_count; index++)
+   {
+      int previous_x = point_xs[index - 1] - inner_left;
+      int previous_y = point_ys[index - 1] - inner_top;
+      int current_x = point_xs[index] - inner_left;
+      int current_y = point_ys[index] - inner_top;
+      g_report_graph_canvas.LineThick(previous_x, previous_y, current_x, current_y, COLOR2RGB(line_color), 2, UINT_MAX, LINE_END_ROUND);
+   }
+
+   for(int index = 0; index < point_count; index++)
+   {
+      int marker_x = point_xs[index] - inner_left;
+      int marker_y = point_ys[index] - inner_top;
+      g_report_graph_canvas.FillRectangle(marker_x - 2, marker_y - 2, marker_x + 2, marker_y + 2, COLOR2RGB(point_color));
+   }
+
+   g_report_graph_canvas.Update(false);
+}
+
 string FormatTradeRowText(const int ordinal, const ATSimClosedTrade &trade)
 {
    string row = "";
@@ -2561,28 +2742,55 @@ void RenderSessionReportWindow()
 
    const string title_font = InpUiFont;
    const string mono_font = "Consolas";
-   const int panel_x = 18;
-   const int panel_y = 18;
-   const int panel_width = 920;
-   const int panel_height = 500;
+   int panel_x = 0;
+   int panel_y = 0;
+   int panel_width = ReportChartWidthPixels();
+   int panel_height = ReportChartHeightPixels();
+   if(panel_width < 900)
+      panel_width = 900;
+   if(panel_height < 640)
+      panel_height = 640;
+
+   const int outer_padding = 18;
+   const int inner_padding = 16;
+   const int header_height = 66;
+   const int gap = 16;
+   int stats_width = MathMax((int)(panel_width * 0.27), 320);
+   int content_width = panel_width - (outer_padding * 2);
+   if(stats_width > content_width - 260)
+      stats_width = MathMax(280, content_width / 3);
+   int top_y = outer_padding + header_height;
+   int graph_height = MathMax((int)(panel_height * 0.32), 210);
+   int graph_x = outer_padding + stats_width + gap;
+   int graph_width = panel_width - graph_x - outer_padding;
+   int stats_height = graph_height;
+   int stats_left_x = outer_padding + inner_padding;
+   int stats_right_x = outer_padding + (stats_width / 2) + 12;
+   int trades_y = top_y + graph_height + gap;
+   int trades_height = panel_height - trades_y - outer_padding - 24;
    const color panel_bg = clrWhite;
    const color panel_border = C'198,205,214';
+   const color section_bg = C'246,248,252';
    const color text_color = C'36,43,52';
    const color sub_color = C'92,105,122';
    const color gain_color = C'28,134,88';
    const color loss_color = C'176,58,72';
 
-   EnsureReportRectangle(g_report_chart_id, ReportObjectName("background"), panel_x, panel_y, panel_width, panel_height, panel_bg, panel_border, 1);
+   EnsureReportRectangle(g_report_chart_id, ReportObjectName("background"), panel_x, panel_y, panel_width, panel_height, panel_bg, panel_bg, 0);
    EnsureReportRectangle(g_report_chart_id, ReportObjectName("accent"), panel_x, panel_y, panel_width, 4, InpAccentColor, InpAccentColor, 0);
-   EnsureReportLabel(g_report_chart_id, ReportObjectName("title"), "AT Replay Session Report", panel_x + 16, panel_y + 16, title_font, 14, text_color);
+   EnsureReportRectangle(g_report_chart_id, ReportObjectName("stats_box"), outer_padding, top_y, stats_width, stats_height, section_bg, panel_border, 1);
+   EnsureReportRectangle(g_report_chart_id, ReportObjectName("graph_box"), graph_x, top_y, graph_width, graph_height, section_bg, panel_border, 1);
+   EnsureReportRectangle(g_report_chart_id, ReportObjectName("trades_box"), outer_padding, trades_y, panel_width - (outer_padding * 2), trades_height, section_bg, panel_border, 1);
+
+   EnsureReportLabel(g_report_chart_id, ReportObjectName("title"), "AT Replay Session Report", outer_padding, outer_padding + 16, title_font, 16, text_color);
    EnsureReportLabel(
       g_report_chart_id,
       ReportObjectName("meta"),
       g_source_symbol + " -> " + g_custom_symbol + " | " + EnumToString((ENUM_TIMEFRAMES)Period())
       + " | " + TimeToString(InpReplayStartTime, TIME_DATE | TIME_MINUTES)
       + " -> " + TimeToString(g_last_replay_time, TIME_DATE | TIME_MINUTES),
-      panel_x + 16,
-      panel_y + 42,
+      outer_padding,
+      outer_padding + 42,
       mono_font,
       9,
       sub_color
@@ -2614,8 +2822,8 @@ void RenderSessionReportWindow()
          g_report_chart_id,
          ReportObjectName("summary_left_" + IntegerToString(row)),
          left_rows[row],
-         panel_x + 16,
-         panel_y + 82 + (row * 18),
+         stats_left_x,
+         top_y + 18 + (row * 20),
          mono_font,
          10,
          (row == 3 && stats.net_profit < 0.0) ? loss_color : text_color
@@ -2624,26 +2832,29 @@ void RenderSessionReportWindow()
          g_report_chart_id,
          ReportObjectName("summary_right_" + IntegerToString(row)),
          right_rows[row],
-         panel_x + 470,
-         panel_y + 82 + (row * 18),
+         stats_right_x,
+         top_y + 18 + (row * 20),
          mono_font,
          10,
          text_color
       );
    }
-   EnsureReportLabel(g_report_chart_id, ReportObjectName("section"), "Recent Trades", panel_x + 16, panel_y + 250, title_font, 11, text_color);
+
+   RenderBalanceGraph(graph_x, top_y, graph_width, graph_height, InpAccentColor, InpAccentColor, text_color, sub_color);
+
+   EnsureReportLabel(g_report_chart_id, ReportObjectName("section"), "Recent Trades", outer_padding + 16, trades_y + 12, title_font, 11, text_color);
    EnsureReportLabel(
       g_report_chart_id,
       ReportObjectName("trade_header"),
       "#  Side   Lot  Open  Close      Entry       Exit       PnL  Reason",
-      panel_x + 16,
-      panel_y + 278,
+      outer_padding + 16,
+      trades_y + 38,
       mono_font,
       9,
       sub_color
    );
 
-   int max_rows = 10;
+   int max_rows = MathMin(64, MathMax((trades_height - 64) / 18, 1));
    for(int row = 0; row < max_rows; row++)
    {
       string object_name = ReportObjectName("trade_row_" + IntegerToString(row));
@@ -2659,8 +2870,8 @@ void RenderSessionReportWindow()
          g_report_chart_id,
          object_name,
          FormatTradeRowText(trade_index + 1, trade),
-         panel_x + 16,
-         panel_y + 302 + (row * 18),
+         outer_padding + 16,
+         trades_y + 62 + (row * 18),
          mono_font,
          9,
          trade.pnl >= 0.0 ? gain_color : loss_color
@@ -2672,7 +2883,7 @@ void RenderSessionReportWindow()
       + (!g_position.open ? "Flat" : PositionSummaryText())
       + " | Pending: "
       + (!g_pending_order.active ? "None" : PositionSummaryText());
-   EnsureReportLabel(g_report_chart_id, ReportObjectName("footer"), footer, panel_x + 16, panel_y + panel_height - 26, mono_font, 9, sub_color);
+   EnsureReportLabel(g_report_chart_id, ReportObjectName("footer"), footer, outer_padding, panel_height - 22, mono_font, 9, sub_color);
 
    ChartRedraw(g_report_chart_id);
 }
