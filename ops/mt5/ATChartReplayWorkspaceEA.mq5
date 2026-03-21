@@ -5,11 +5,12 @@
 
 input string InpWorkspaceId = "replay1";
 input string InpSourceSymbol = "";
+input double InpReplayStartingBalance = 10000.0;
 input ENUM_TIMEFRAMES InpReplayPeriod = PERIOD_M5;
 input datetime InpReplayStartTime = D'2026.03.20 09:30:00';
 input datetime InpReplayEndTime = D'2026.03.20 16:00:00';
 input int InpWarmupMinutes = 240;
-input bool InpUseRealTicks = true;
+input bool InpUseRealTicks = false;
 input bool InpStartPaused = true;
 input int InpTimerIntervalSeconds = 1;
 input int InpPlaybackUnitsPerTimer = 1;
@@ -17,7 +18,7 @@ input int InpPlaybackUnitsPerTimer = 1;
 input double InpTradeVolumeLots = 0.10;
 input int InpTradeStopLossPoints = 0;
 input int InpTradeTakeProfitPoints = 0;
-input double InpDefaultProtectionPips = 30.0;
+input double InpDefaultProtectionPips = 4.0;
 input int InpInteractiveProtectionPoints = 250;
 input int InpPendingEntryOffsetPoints = 120;
 
@@ -160,6 +161,8 @@ string g_entry_line_name = "";
 string g_stop_line_name = "";
 string g_take_line_name = "";
 string g_entry_tag_name = "";
+string g_stop_tag_name = "";
+string g_take_tag_name = "";
 string g_floating_tag_name = "";
 
 int OnInit()
@@ -177,9 +180,7 @@ int OnInit()
    g_trade_volume_lots = NormalizeVolumeLots(InpTradeVolumeLots);
    if(g_trade_volume_lots <= 0.0)
       g_trade_volume_lots = MathMax(InpTradeVolumeLots, 0.01);
-   g_simulated_balance_start = AccountInfoDouble(ACCOUNT_BALANCE);
-   if(g_simulated_balance_start <= 0.0)
-      g_simulated_balance_start = 10000.0;
+   g_simulated_balance_start = ResolveReplayStartingBalance();
 
    if(!LoadReplaySourceData())
       return(INIT_FAILED);
@@ -232,11 +233,11 @@ void OnTick()
 
 void OnTimer()
 {
-   if(!g_is_ready || !g_is_playing)
-   {
-      UpdateInterface();
+   if(!g_is_ready)
       return;
-   }
+
+   if(!g_is_playing)
+      return;
 
    bool progressed = true;
    for(int unit = 0; unit < g_playback_units; unit++)
@@ -283,9 +284,8 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 
    if(id == CHARTEVENT_CHART_CHANGE)
    {
-      ConfigureChartBehavior();
-      BuildInterface();
-      UpdateInterface();
+      if(g_is_playing)
+         UpdateInterface();
    }
 }
 
@@ -337,12 +337,41 @@ void AssignObjectNames()
    g_stop_line_name = BuildObjectName("stop_line");
    g_take_line_name = BuildObjectName("take_line");
    g_entry_tag_name = BuildObjectName("entry_tag");
+   g_stop_tag_name = BuildObjectName("stop_tag");
+   g_take_tag_name = BuildObjectName("take_tag");
    g_floating_tag_name = BuildObjectName("floating_tag");
 }
 
 string BuildObjectName(const string suffix)
 {
    return(g_prefix + "_" + suffix);
+}
+
+double ResolveReplayStartingBalance()
+{
+   if(InpReplayStartingBalance > 0.0)
+      return(InpReplayStartingBalance);
+
+   double account_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   if(account_balance > 0.0)
+      return(account_balance);
+
+   return(10000.0);
+}
+
+void RefreshReplayChart()
+{
+   string chart_symbol = Symbol();
+   if(chart_symbol == "")
+      chart_symbol = g_custom_symbol;
+
+   ENUM_TIMEFRAMES chart_period = (ENUM_TIMEFRAMES)Period();
+   if(chart_period <= PERIOD_CURRENT)
+      chart_period = InpReplayPeriod;
+
+   ResetLastError();
+   if(!ChartSetSymbolPeriod(g_chart_id, chart_symbol, chart_period))
+      Print(__FUNCTION__, ": ChartSetSymbolPeriod refresh failed. Error code = ", GetLastError());
 }
 
 bool ResolveReplaySymbols()
@@ -659,6 +688,7 @@ bool ResetReplayWorkspace(const bool preserve_play_state)
    if(!preserve_play_state)
       g_is_playing = !InpStartPaused;
 
+   RefreshReplayChart();
    ConfigureChartBehavior();
    InitializeReplaySnapshots();
    SynchronizeViewToLatest();
@@ -1682,13 +1712,25 @@ void DrawTradeObjects()
       color entry_color = (g_position.side > 0 ? InpGoodColor : InpBadColor);
       EnsureHLine(g_entry_line_name, g_position.entry_price, entry_color, STYLE_SOLID);
       if(g_position.stop_loss > 0.0)
+      {
          EnsureHLine(g_stop_line_name, g_position.stop_loss, InpBadColor, STYLE_DOT);
+         EnsureTradeText(g_stop_tag_name, g_last_replay_time, g_position.stop_loss, "SL", InpBadColor);
+      }
       else
+      {
          ObjectDelete(g_chart_id, g_stop_line_name);
+         ObjectDelete(g_chart_id, g_stop_tag_name);
+      }
       if(g_position.take_profit > 0.0)
+      {
          EnsureHLine(g_take_line_name, g_position.take_profit, InpGoodColor, STYLE_DOT);
+         EnsureTradeText(g_take_tag_name, g_last_replay_time, g_position.take_profit, "TP", InpGoodColor);
+      }
       else
+      {
          ObjectDelete(g_chart_id, g_take_line_name);
+         ObjectDelete(g_chart_id, g_take_tag_name);
+      }
       EnsureTradeText(g_entry_tag_name, g_position.opened_at, g_position.entry_price, (g_position.side > 0 ? "BUY " : "SELL ") + VolumeToText(g_position.volume_lots), entry_color);
       double floating_price = (g_position.side > 0 ? g_last_bid : g_last_ask);
       double floating_pnl = CalculatePositionPnl(floating_price);
@@ -1704,13 +1746,25 @@ void DrawTradeObjects()
       color entry_color = (side > 0 ? InpGoodColor : InpBadColor);
       EnsureHLine(g_entry_line_name, g_pending_order.entry_price, entry_color, STYLE_SOLID);
       if(g_pending_order.stop_loss > 0.0)
+      {
          EnsureHLine(g_stop_line_name, g_pending_order.stop_loss, InpBadColor, STYLE_DOT);
+         EnsureTradeText(g_stop_tag_name, g_last_replay_time, g_pending_order.stop_loss, "SL", InpBadColor);
+      }
       else
+      {
          ObjectDelete(g_chart_id, g_stop_line_name);
+         ObjectDelete(g_chart_id, g_stop_tag_name);
+      }
       if(g_pending_order.take_profit > 0.0)
+      {
          EnsureHLine(g_take_line_name, g_pending_order.take_profit, InpGoodColor, STYLE_DOT);
+         EnsureTradeText(g_take_tag_name, g_last_replay_time, g_pending_order.take_profit, "TP", InpGoodColor);
+      }
       else
+      {
          ObjectDelete(g_chart_id, g_take_line_name);
+         ObjectDelete(g_chart_id, g_take_tag_name);
+      }
       EnsureTradeText(g_entry_tag_name, g_pending_order.created_at, g_pending_order.entry_price, PendingOrderTypeText(g_pending_order.type) + " " + VolumeToText(g_pending_order.volume_lots), entry_color);
       EnsureTradeText(g_floating_tag_name, g_last_replay_time, g_pending_order.entry_price, "Drag entry / SL / TP", InpMetaColor);
       UpdateTradeViewport();
@@ -1808,6 +1862,8 @@ void DeleteTradeObjects()
    ObjectDelete(g_chart_id, g_stop_line_name);
    ObjectDelete(g_chart_id, g_take_line_name);
    ObjectDelete(g_chart_id, g_entry_tag_name);
+   ObjectDelete(g_chart_id, g_stop_tag_name);
+   ObjectDelete(g_chart_id, g_take_tag_name);
    ObjectDelete(g_chart_id, g_floating_tag_name);
 }
 
@@ -2097,7 +2153,6 @@ void SetStatus(const string text, const color text_color)
 {
    ObjectSetString(g_chart_id, g_status_name, OBJPROP_TEXT, text);
    ObjectSetInteger(g_chart_id, g_status_name, OBJPROP_COLOR, text_color);
-   ChartRedraw(g_chart_id);
 }
 
 bool IsVolumeEditActive()
