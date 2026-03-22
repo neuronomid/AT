@@ -141,6 +141,7 @@ int g_panel_y_offset = 18;
 ATReplayStepMode g_step_mode = REPLAY_MODE_BAR;
 bool g_is_ready = false;
 bool g_is_playing = false;
+bool g_follow_latest_view = true;
 int g_playback_units = 1;
 bool g_has_real_ticks = false;
 bool g_using_synthetic_ticks = false;
@@ -339,23 +340,24 @@ int OnInit()
       return(INIT_SUCCEEDED);
    }
 
+   bool configuration_matches = ReplayConfigurationMatchesCurrentInputs();
    bool restored_from_file = false;
+   bool restored_from_visible_history = false;
    bool reset_during_init = false;
-   if(!ReplayConfigurationMatchesCurrentInputs() || !WaitForVisibleCustomHistory(6, 50))
+
+   restored_from_file = RestoreReplaySessionState();
+   if(!restored_from_file && configuration_matches)
+   {
+      bool custom_history_visible = WaitForVisibleCustomHistory(20, 100);
+      if(custom_history_visible && HydrateReplayStateFromVisibleHistory())
+         restored_from_visible_history = true;
+   }
+
+   if(!restored_from_file && !restored_from_visible_history)
    {
       if(!ResetReplayWorkspace(false))
          return(INIT_FAILED);
       reset_during_init = true;
-   }
-   else
-   {
-      restored_from_file = RestoreReplaySessionState();
-      if(!restored_from_file && !HydrateReplayStateFromVisibleHistory())
-      {
-         if(!ResetReplayWorkspace(false))
-            return(INIT_FAILED);
-         reset_during_init = true;
-      }
    }
 
    ConfigureChartBehavior();
@@ -380,7 +382,7 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
-   if(reason == REASON_CHARTCHANGE && g_is_ready)
+   if(g_is_ready)
       SaveReplaySessionState();
    CloseReportChart();
    DeleteInterface();
@@ -456,8 +458,24 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 
    if(id == CHARTEVENT_CHART_CHANGE)
    {
-      if(g_is_playing)
+      bool near_latest = IsViewportNearLatest();
+      bool detached_view = false;
+      bool reattached_view = false;
+      if(g_follow_latest_view && !near_latest)
+      {
+         g_follow_latest_view = false;
+         detached_view = true;
+         SetStatus("Viewport detached. Drag back to the right edge to follow the latest replay bar again.", InpMetaColor);
+      }
+      else if(!g_follow_latest_view && near_latest)
+      {
+         g_follow_latest_view = true;
+         reattached_view = true;
+      }
+
+      if(detached_view || reattached_view || g_is_playing)
          UpdateInterface();
+      return;
    }
 }
 
@@ -472,7 +490,9 @@ void ConfigureChartBehavior()
    ChartSetInteger(g_chart_id, CHART_DRAG_TRADE_LEVELS, true);
    ChartSetInteger(g_chart_id, CHART_QUICK_NAVIGATION, false);
    ChartSetInteger(g_chart_id, CHART_KEYBOARD_CONTROL, true);
-   ChartSetInteger(g_chart_id, CHART_AUTOSCROLL, true);
+   // Keep MT5 autoscroll disabled and manage the "follow latest" behavior
+   // explicitly so the user can pan back through prior replay bars.
+   ChartSetInteger(g_chart_id, CHART_AUTOSCROLL, false);
    ChartSetInteger(g_chart_id, CHART_SHIFT, true);
    ChartSetDouble(g_chart_id, CHART_SHIFT_SIZE, 20.0);
 }
@@ -710,13 +730,52 @@ void EnsureReplayStateFolders()
 
 string ReplaySessionStatePath()
 {
+   return("AT\\chart_replay_workspace\\" + SanitizeSymbolToken(g_custom_symbol) + ".tsv");
+}
+
+string ReplaySessionStateLegacyPath(const long chart_id_value)
+{
    return(
       "AT\\chart_replay_workspace\\"
       + SanitizeSymbolToken(g_custom_symbol)
       + "_"
-      + IntegerToString((int)g_chart_id)
+      + IntegerToString((int)chart_id_value)
       + ".tsv"
    );
+}
+
+string ResolveReplaySessionStateReadPath()
+{
+   string stable_path = ReplaySessionStatePath();
+   if(FileIsExist(stable_path, FILE_COMMON))
+      return(stable_path);
+
+   string best_legacy_path = "";
+   long best_modify_date = -1;
+   string found_name = "";
+   string filter = "AT\\chart_replay_workspace\\" + SanitizeSymbolToken(g_custom_symbol) + "_*.tsv";
+   long search_handle = FileFindFirst(filter, found_name, FILE_COMMON);
+   if(search_handle != INVALID_HANDLE)
+   {
+      do
+      {
+         string candidate_path = "AT\\chart_replay_workspace\\" + found_name;
+         long modify_date = FileGetInteger(candidate_path, FILE_MODIFY_DATE, true);
+         if(modify_date >= 0 && (best_legacy_path == "" || modify_date > best_modify_date))
+         {
+            best_modify_date = modify_date;
+            best_legacy_path = candidate_path;
+         }
+      }
+      while(FileFindNext(search_handle, found_name));
+
+      FileFindClose(search_handle);
+   }
+
+   if(best_legacy_path != "")
+      return(best_legacy_path);
+
+   return(stable_path);
 }
 
 string StateBoolText(const bool value)
@@ -992,7 +1051,7 @@ bool SaveReplaySessionState()
 bool RestoreReplaySessionState()
 {
    EnsureReplayStateFolders();
-   string path = ReplaySessionStatePath();
+   string path = ResolveReplaySessionStateReadPath();
    int handle = FileOpen(
       path,
       FILE_READ | FILE_CSV | FILE_COMMON | FILE_ANSI | FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -1022,6 +1081,9 @@ bool RestoreReplaySessionState()
    int saved_panel_y_offset = g_panel_y_offset;
    double saved_simulated_balance_start = g_simulated_balance_start;
    int saved_snapshot_cursor = -1;
+   ATReplaySnapshot restore_snapshot;
+   ZeroMemory(restore_snapshot);
+   bool has_restore_snapshot = false;
 
    while(!FileIsEnding(handle))
    {
@@ -1155,16 +1217,59 @@ bool RestoreReplaySessionState()
    if(!has_meta || !has_session)
       return(false);
 
+   int max_m1_index = ArraySize(g_source_m1);
+   int max_tick_index = ArraySize(g_source_ticks);
+   int restore_snapshot_index = -1;
+   if(ArraySize(saved_snapshots) > 0)
+   {
+      restore_snapshot_index = saved_snapshot_cursor;
+      if(restore_snapshot_index < 0 || restore_snapshot_index >= ArraySize(saved_snapshots))
+         restore_snapshot_index = ArraySize(saved_snapshots) - 1;
+
+      if(restore_snapshot_index >= 0)
+      {
+         restore_snapshot = saved_snapshots[restore_snapshot_index];
+         has_restore_snapshot = true;
+      }
+   }
+
+   if(!has_restore_snapshot)
+   {
+      restore_snapshot.step_mode = (ATReplayStepMode)saved_step_mode;
+      restore_snapshot.next_m1_index = saved_next_m1_index;
+      restore_snapshot.next_tick_index = saved_next_tick_index;
+      restore_snapshot.last_replay_time = saved_last_replay_time;
+      restore_snapshot.last_bid = saved_last_bid;
+      restore_snapshot.last_ask = saved_last_ask;
+      restore_snapshot.realized_pnl = saved_realized_pnl;
+      restore_snapshot.closed_trade_count = ArraySize(saved_trades);
+      restore_snapshot.position = saved_position;
+      restore_snapshot.pending_order = saved_pending;
+      has_restore_snapshot = true;
+   }
+
    g_step_mode = (ATReplayStepMode)saved_step_mode;
-   if(g_step_mode == REPLAY_MODE_TICK && ArraySize(g_source_ticks) <= 0)
+   if(g_step_mode == REPLAY_MODE_TICK && max_tick_index <= 0)
    {
       g_step_mode = REPLAY_MODE_BAR;
       saved_next_tick_index = 0;
       saved_is_playing = false;
+
+      restore_snapshot.step_mode = REPLAY_MODE_BAR;
+      restore_snapshot.next_tick_index = 0;
+      restore_snapshot.last_replay_time = saved_last_replay_time;
+      int fallback_next_m1_index = FindFirstBarAfterMinute(FloorToMinute(saved_last_replay_time));
+      if(fallback_next_m1_index < 0)
+         fallback_next_m1_index = max_m1_index;
+      restore_snapshot.next_m1_index = fallback_next_m1_index;
+      saved_next_m1_index = fallback_next_m1_index;
    }
 
-   int max_m1_index = ArraySize(g_source_m1);
-   int max_tick_index = ArraySize(g_source_ticks);
+   restore_snapshot.next_m1_index = MathMax(g_first_replay_m1_index, MathMin(restore_snapshot.next_m1_index, max_m1_index));
+   restore_snapshot.next_tick_index = MathMax(0, MathMin(restore_snapshot.next_tick_index, max_tick_index));
+   if(has_restore_snapshot && !RebuildCustomHistoryToSnapshot(restore_snapshot))
+      return(false);
+
    g_next_m1_index = MathMax(g_first_replay_m1_index, MathMin(saved_next_m1_index, max_m1_index));
    g_next_tick_index = MathMax(0, MathMin(saved_next_tick_index, max_tick_index));
    g_last_replay_time = saved_last_replay_time;
@@ -1418,6 +1523,7 @@ bool ResetReplayWorkspace(const bool preserve_play_state)
       ChartRedraw(g_chart_id);
    ConfigureChartBehavior();
    InitializeReplaySnapshots();
+   g_follow_latest_view = true;
    SynchronizeViewToLatest();
    ChartRedraw(g_chart_id);
    SetStatus("Replay reset to the chosen start point.", InpAccentColor);
@@ -1904,6 +2010,11 @@ void HandleKeyPress(const int key_code)
 void TogglePlayPause()
 {
    g_is_playing = !g_is_playing;
+   if(g_is_playing)
+   {
+      g_follow_latest_view = true;
+      SynchronizeViewToLatest();
+   }
    SetStatus(g_is_playing ? "Playback running." : "Playback paused.", g_is_playing ? InpGoodColor : InpAccentColor);
    UpdateInterface();
 }
@@ -1954,6 +2065,7 @@ void ToggleModeAndReset()
    CaptureReplaySnapshot();
    ConfigureChartBehavior();
    DrawTradeObjects();
+   g_follow_latest_view = true;
    SynchronizeViewToLatest();
 
    string mode_message = (g_step_mode == REPLAY_MODE_TICK ? "Mode set to TICK at the current replay point." : "Mode set to BAR at the current replay point.");
@@ -2825,6 +2937,7 @@ void UpdateInterface()
    string mode_text = (g_step_mode == REPLAY_MODE_TICK ? "TICK" : "BAR");
    mode_text += " | x" + IntegerToString(g_playback_units);
    mode_text += " | " + (g_is_playing ? "playing" : "paused");
+   mode_text += " | " + (g_follow_latest_view ? "follow" : "free");
    if(g_step_mode == REPLAY_MODE_TICK)
    {
       if(g_has_real_ticks)
@@ -3880,8 +3993,21 @@ int ResolveInnerY(const int offset)
    return(g_panel_y_offset + offset);
 }
 
+bool IsViewportNearLatest()
+{
+   long first_visible_bar = ChartGetInteger(g_chart_id, CHART_FIRST_VISIBLE_BAR, 0);
+   long visible_bars = ChartGetInteger(g_chart_id, CHART_VISIBLE_BARS, 0);
+   if(first_visible_bar < 0 || visible_bars <= 0)
+      return(true);
+
+   long slack_bars = (long)MathMax(10, (int)MathCeil((double)visible_bars * 0.15));
+   return(first_visible_bar <= (visible_bars + slack_bars));
+}
+
 void SynchronizeViewToLatest()
 {
+   if(!g_follow_latest_view)
+      return;
    ChartNavigate(g_chart_id, CHART_END, 0);
 }
 

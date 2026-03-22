@@ -491,6 +491,8 @@ It supports:
 - `BAR` stepping
 - `TICK` stepping when historical ticks are available
 - `play`, `pause`, `reset`, and speed controls
+- follow-latest playback that detaches when you pan back to older bars
+- timeframe switches that preserve the current replay state instead of rewinding to the start
 - simulated `BUY`, `SELL`, and `CLOSE`
 
 Usage instructions live in `docs/mt5_chart_replay_workspace.md`.

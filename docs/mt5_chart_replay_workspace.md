@@ -69,6 +69,7 @@ Then compile it in MT5 MetaEditor.
 - `STEP`: advance one unit in the current mode
 - `RESET`: go back to the selected replay start point
 - `MODE`: switch between `BAR` and `TICK` and reset
+- switching the chart timeframe keeps the current replay cursor, simulated position state, and drawings; only `RESET` rewinds to the selected replay start
 - `REPORT`: opens or refreshes a separate MT5 chart window with a full-session report dashboard, including the balance curve and recent trades
 - `VOL-`, `VOL+`: decrease or increase the staged lot size for the next trade
 - `S-`, `S+`: slow down or speed up playback
@@ -76,6 +77,7 @@ Then compile it in MT5 MetaEditor.
 - drag the plotted `SL` and `TP` lines on the chart to adjust protection for the staged order or open simulated position
 - drag the panel background to move the control panel anywhere on the chart during the session
 - the replay view expands to keep entry, SL, and TP levels visible while a simulated trade is active
+- the replay view follows the newest bar by default, but dragging back to older price action detaches that follow mode until you return to the right edge
 
 ## Drawing
 
@@ -96,6 +98,7 @@ On attach and replay reset, the EA explicitly restores the chart’s standard mo
 - left-mouse chart scrolling enabled
 - drag support for price levels enabled
 - replay auto-pauses when you start creating a normal MT5 drawing object
+- follow-latest is handled by the EA instead of MT5 autoscroll so older replay days stay reachable during multi-day sessions
 
 ## Recommended Workflow
 
