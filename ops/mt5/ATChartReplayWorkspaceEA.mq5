@@ -213,7 +213,7 @@ string g_stop_tag_name = "";
 string g_take_tag_name = "";
 string g_floating_tag_name = "";
 
-ENUM_TIMEFRAMES ReplayBarPeriod()
+ENUM_TIMEFRAMES ConfiguredReplayPeriod()
 {
    if(InpReplayPeriod > PERIOD_CURRENT)
       return(InpReplayPeriod);
@@ -223,6 +223,15 @@ ENUM_TIMEFRAMES ReplayBarPeriod()
       return(chart_period);
 
    return(PERIOD_M1);
+}
+
+ENUM_TIMEFRAMES ReplayBarPeriod()
+{
+   ENUM_TIMEFRAMES chart_period = (ENUM_TIMEFRAMES)Period();
+   if(Symbol() == g_custom_symbol && chart_period > PERIOD_CURRENT)
+      return(chart_period);
+
+   return(ConfiguredReplayPeriod());
 }
 
 bool WaitForVisibleCustomHistory(const int max_attempts, const int sleep_millis)
@@ -246,11 +255,40 @@ bool WaitForVisibleCustomHistory(const int max_attempts, const int sleep_millis)
    return(false);
 }
 
+string ReplayDescriptionField(const string description, const string key)
+{
+   string token = "|" + key + "=";
+   int start = StringFind(description, token);
+   if(start < 0)
+   {
+      string prefix = key + "=";
+      if(StringFind(description, prefix) != 0)
+         return("");
+      token = prefix;
+      start = 0;
+   }
+
+   int value_start = start + StringLen(token);
+   int value_end = StringFind(description, "|", value_start);
+   if(value_end < 0)
+      return(StringSubstr(description, value_start));
+
+   return(StringSubstr(description, value_start, value_end - value_start));
+}
+
 bool ReplayConfigurationMatchesCurrentInputs()
 {
-   string expected = BuildReplayDescription(g_source_symbol, InpWorkspaceId);
    string current = SymbolInfoString(g_custom_symbol, SYMBOL_DESCRIPTION);
-   return(current == expected);
+   if(current == "")
+      return(false);
+
+   return(
+      ReplayDescriptionField(current, "source") == g_source_symbol
+      && ReplayDescriptionField(current, "workspace") == InpWorkspaceId
+      && ReplayDescriptionField(current, "start") == TimeToString(InpReplayStartTime, TIME_DATE | TIME_MINUTES)
+      && ReplayDescriptionField(current, "end") == TimeToString(InpReplayEndTime, TIME_DATE | TIME_MINUTES)
+      && ReplayDescriptionField(current, "warmup") == IntegerToString(InpWarmupMinutes)
+   );
 }
 
 string ReplayPeriodText()
@@ -301,19 +339,35 @@ int OnInit()
       return(INIT_SUCCEEDED);
    }
 
+   bool restored_from_file = false;
+   bool reset_during_init = false;
    if(!ReplayConfigurationMatchesCurrentInputs() || !WaitForVisibleCustomHistory(6, 50))
    {
       if(!ResetReplayWorkspace(false))
          return(INIT_FAILED);
+      reset_during_init = true;
    }
    else
    {
-      SynchronizeQuoteFromCustomHistory();
+      restored_from_file = RestoreReplaySessionState();
+      if(!restored_from_file && !HydrateReplayStateFromVisibleHistory())
+      {
+         if(!ResetReplayWorkspace(false))
+            return(INIT_FAILED);
+         reset_during_init = true;
+      }
    }
 
    ConfigureChartBehavior();
    BuildInterface();
-   InitializeReplaySnapshots();
+   if(!restored_from_file)
+      InitializeReplaySnapshots();
+   if(restored_from_file)
+      SetStatus("Replay session restored after chart change.", InpAccentColor);
+   else if(reset_during_init)
+      SetStatus("Replay reset to the chosen start point.", InpAccentColor);
+   else
+      SetStatus("Replay workspace ready.", InpAccentColor);
    UpdateInterface();
    SynchronizeViewToLatest();
    ChartSetInteger(g_chart_id, CHART_EVENT_OBJECT_CREATE, true);
@@ -326,6 +380,8 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+   if(reason == REASON_CHARTCHANGE && g_is_ready)
+      SaveReplaySessionState();
    CloseReportChart();
    DeleteInterface();
    DeleteTradeObjects();
@@ -646,6 +702,56 @@ string SanitizeSymbolToken(string value)
    return(output);
 }
 
+void EnsureReplayStateFolders()
+{
+   FolderCreate("AT", FILE_COMMON);
+   FolderCreate("AT\\chart_replay_workspace", FILE_COMMON);
+}
+
+string ReplaySessionStatePath()
+{
+   return(
+      "AT\\chart_replay_workspace\\"
+      + SanitizeSymbolToken(g_custom_symbol)
+      + "_"
+      + IntegerToString((int)g_chart_id)
+      + ".tsv"
+   );
+}
+
+string StateBoolText(const bool value)
+{
+   return(value ? "1" : "0");
+}
+
+bool StateTextToBool(const string value)
+{
+   return(value == "1" || value == "true" || value == "TRUE");
+}
+
+string StateTimeText(const datetime value)
+{
+   return(IntegerToString((int)value));
+}
+
+datetime StateTextToTime(const string value)
+{
+   return((datetime)StringToInteger(value));
+}
+
+string StateDoubleText(const double value)
+{
+   return(DoubleToString(value, 10));
+}
+
+string SanitizeStateField(string value)
+{
+   StringReplace(value, "\t", " ");
+   StringReplace(value, "\r", " ");
+   StringReplace(value, "\n", " ");
+   return(TrimString(value));
+}
+
 bool LoadReplaySourceData()
 {
    if(InpReplayEndTime <= InpReplayStartTime)
@@ -750,6 +856,403 @@ string BuildReplayDescription(const string source_symbol, const string workspace
       + "|end=" + TimeToString(InpReplayEndTime, TIME_DATE | TIME_MINUTES)
       + "|warmup=" + IntegerToString(InpWarmupMinutes)
    );
+}
+
+bool SaveReplaySessionState()
+{
+   if(g_custom_symbol == "")
+      return(false);
+
+   EnsureReplayStateFolders();
+   string path = ReplaySessionStatePath();
+
+   int handle = FileOpen(
+      path,
+      FILE_WRITE | FILE_CSV | FILE_COMMON | FILE_ANSI | FILE_SHARE_READ | FILE_SHARE_WRITE,
+      '\t'
+   );
+   if(handle == INVALID_HANDLE)
+   {
+      Print(__FUNCTION__, ": FileOpen failed for ", path, ". Error code = ", GetLastError());
+      return(false);
+   }
+
+   FileWrite(
+      handle,
+      "meta",
+      "2",
+      SanitizeStateField(g_source_symbol),
+      SanitizeStateField(InpWorkspaceId),
+      StateTimeText(InpReplayStartTime),
+      StateTimeText(InpReplayEndTime),
+      IntegerToString(InpWarmupMinutes),
+      SanitizeStateField(g_custom_symbol)
+   );
+
+   FileWrite(
+      handle,
+      "session",
+      IntegerToString((int)g_step_mode),
+      IntegerToString(g_next_m1_index),
+      IntegerToString(g_next_tick_index),
+      StateTimeText(g_last_replay_time),
+      StateDoubleText(g_last_bid),
+      StateDoubleText(g_last_ask),
+      StateDoubleText(g_realized_pnl),
+      StateDoubleText(g_trade_volume_lots),
+      IntegerToString(g_playback_units),
+      StateBoolText(g_is_playing),
+      IntegerToString((int)g_panel_corner),
+      IntegerToString(g_panel_x_offset),
+      IntegerToString(g_panel_y_offset),
+      StateDoubleText(g_simulated_balance_start),
+      IntegerToString(g_snapshot_cursor)
+   );
+
+   FileWrite(
+      handle,
+      "position",
+      StateBoolText(g_position.open),
+      IntegerToString(g_position.side),
+      StateDoubleText(g_position.volume_lots),
+      StateDoubleText(g_position.entry_price),
+      StateDoubleText(g_position.stop_loss),
+      StateDoubleText(g_position.take_profit),
+      StateTimeText(g_position.opened_at)
+   );
+
+   FileWrite(
+      handle,
+      "pending",
+      StateBoolText(g_pending_order.active),
+      IntegerToString((int)g_pending_order.type),
+      StateDoubleText(g_pending_order.volume_lots),
+      StateDoubleText(g_pending_order.entry_price),
+      StateDoubleText(g_pending_order.stop_loss),
+      StateDoubleText(g_pending_order.take_profit),
+      StateTimeText(g_pending_order.created_at)
+   );
+
+   for(int index = 0; index < g_closed_trade_count; index++)
+   {
+      ATSimClosedTrade trade = g_closed_trades[index];
+      FileWrite(
+         handle,
+         "closed",
+         IntegerToString(trade.side),
+         StateDoubleText(trade.volume_lots),
+         StateTimeText(trade.opened_at),
+         StateTimeText(trade.closed_at),
+         StateDoubleText(trade.entry_price),
+         StateDoubleText(trade.exit_price),
+         StateDoubleText(trade.stop_loss),
+         StateDoubleText(trade.take_profit),
+         StateDoubleText(trade.pnl),
+         StateDoubleText(trade.balance_after),
+         SanitizeStateField(trade.exit_reason)
+      );
+   }
+
+   for(int snapshot_index = 0; snapshot_index < g_snapshot_count; snapshot_index++)
+   {
+      ATReplaySnapshot snapshot = g_snapshots[snapshot_index];
+      FileWrite(
+         handle,
+         "snapshot",
+         IntegerToString((int)snapshot.step_mode),
+         IntegerToString(snapshot.next_m1_index),
+         IntegerToString(snapshot.next_tick_index),
+         StateTimeText(snapshot.last_replay_time),
+         StateDoubleText(snapshot.last_bid),
+         StateDoubleText(snapshot.last_ask),
+         StateDoubleText(snapshot.realized_pnl),
+         IntegerToString(snapshot.closed_trade_count),
+         StateBoolText(snapshot.position.open),
+         IntegerToString(snapshot.position.side),
+         StateDoubleText(snapshot.position.volume_lots),
+         StateDoubleText(snapshot.position.entry_price),
+         StateDoubleText(snapshot.position.stop_loss),
+         StateDoubleText(snapshot.position.take_profit),
+         StateTimeText(snapshot.position.opened_at),
+         StateBoolText(snapshot.pending_order.active),
+         IntegerToString((int)snapshot.pending_order.type),
+         StateDoubleText(snapshot.pending_order.volume_lots),
+         StateDoubleText(snapshot.pending_order.entry_price),
+         StateDoubleText(snapshot.pending_order.stop_loss),
+         StateDoubleText(snapshot.pending_order.take_profit),
+         StateTimeText(snapshot.pending_order.created_at)
+      );
+   }
+
+   FileFlush(handle);
+   FileClose(handle);
+   return(true);
+}
+
+bool RestoreReplaySessionState()
+{
+   EnsureReplayStateFolders();
+   string path = ReplaySessionStatePath();
+   int handle = FileOpen(
+      path,
+      FILE_READ | FILE_CSV | FILE_COMMON | FILE_ANSI | FILE_SHARE_READ | FILE_SHARE_WRITE,
+      '\t'
+   );
+   if(handle == INVALID_HANDLE)
+      return(false);
+
+   bool has_meta = false;
+   bool has_session = false;
+   ATSimPosition saved_position = {false, 0, 0.0, 0.0, 0.0, 0.0, 0};
+   ATSimPendingOrder saved_pending = {false, PENDING_NONE, 0.0, 0.0, 0.0, 0.0, 0};
+   ATSimClosedTrade saved_trades[];
+   ATReplaySnapshot saved_snapshots[];
+   int saved_step_mode = (int)g_step_mode;
+   int saved_next_m1_index = g_first_replay_m1_index;
+   int saved_next_tick_index = 0;
+   datetime saved_last_replay_time = g_last_replay_time;
+   double saved_last_bid = g_last_bid;
+   double saved_last_ask = g_last_ask;
+   double saved_realized_pnl = g_realized_pnl;
+   double saved_trade_volume_lots = g_trade_volume_lots;
+   int saved_playback_units = g_playback_units;
+   bool saved_is_playing = g_is_playing;
+   int saved_panel_corner = (int)g_panel_corner;
+   int saved_panel_x_offset = g_panel_x_offset;
+   int saved_panel_y_offset = g_panel_y_offset;
+   double saved_simulated_balance_start = g_simulated_balance_start;
+   int saved_snapshot_cursor = -1;
+
+   while(!FileIsEnding(handle))
+   {
+      string row_type = FileReadString(handle);
+      if(row_type == "")
+         continue;
+
+      if(row_type == "meta")
+      {
+         string version = FileReadString(handle);
+         string source_symbol = FileReadString(handle);
+         string workspace_id = FileReadString(handle);
+         datetime replay_start = StateTextToTime(FileReadString(handle));
+         datetime replay_end = StateTextToTime(FileReadString(handle));
+         int warmup_minutes = (int)StringToInteger(FileReadString(handle));
+         string custom_symbol = FileReadString(handle);
+
+         has_meta =
+            version == "2"
+            && source_symbol == g_source_symbol
+            && workspace_id == InpWorkspaceId
+            && replay_start == InpReplayStartTime
+            && replay_end == InpReplayEndTime
+            && warmup_minutes == InpWarmupMinutes
+            && custom_symbol == g_custom_symbol;
+         continue;
+      }
+
+      if(row_type == "session")
+      {
+         saved_step_mode = (int)StringToInteger(FileReadString(handle));
+         saved_next_m1_index = (int)StringToInteger(FileReadString(handle));
+         saved_next_tick_index = (int)StringToInteger(FileReadString(handle));
+         saved_last_replay_time = StateTextToTime(FileReadString(handle));
+         saved_last_bid = StringToDouble(FileReadString(handle));
+         saved_last_ask = StringToDouble(FileReadString(handle));
+         saved_realized_pnl = StringToDouble(FileReadString(handle));
+         saved_trade_volume_lots = StringToDouble(FileReadString(handle));
+         saved_playback_units = (int)StringToInteger(FileReadString(handle));
+         saved_is_playing = StateTextToBool(FileReadString(handle));
+         saved_panel_corner = (int)StringToInteger(FileReadString(handle));
+         saved_panel_x_offset = (int)StringToInteger(FileReadString(handle));
+         saved_panel_y_offset = (int)StringToInteger(FileReadString(handle));
+         saved_simulated_balance_start = StringToDouble(FileReadString(handle));
+         saved_snapshot_cursor = (int)StringToInteger(FileReadString(handle));
+         has_session = true;
+         continue;
+      }
+
+      if(row_type == "position")
+      {
+         saved_position.open = StateTextToBool(FileReadString(handle));
+         saved_position.side = (int)StringToInteger(FileReadString(handle));
+         saved_position.volume_lots = StringToDouble(FileReadString(handle));
+         saved_position.entry_price = StringToDouble(FileReadString(handle));
+         saved_position.stop_loss = StringToDouble(FileReadString(handle));
+         saved_position.take_profit = StringToDouble(FileReadString(handle));
+         saved_position.opened_at = StateTextToTime(FileReadString(handle));
+         continue;
+      }
+
+      if(row_type == "pending")
+      {
+         saved_pending.active = StateTextToBool(FileReadString(handle));
+         saved_pending.type = (ATSimPendingType)StringToInteger(FileReadString(handle));
+         saved_pending.volume_lots = StringToDouble(FileReadString(handle));
+         saved_pending.entry_price = StringToDouble(FileReadString(handle));
+         saved_pending.stop_loss = StringToDouble(FileReadString(handle));
+         saved_pending.take_profit = StringToDouble(FileReadString(handle));
+         saved_pending.created_at = StateTextToTime(FileReadString(handle));
+         continue;
+      }
+
+      if(row_type == "closed")
+      {
+         ATSimClosedTrade trade;
+         ZeroMemory(trade);
+         trade.side = (int)StringToInteger(FileReadString(handle));
+         trade.volume_lots = StringToDouble(FileReadString(handle));
+         trade.opened_at = StateTextToTime(FileReadString(handle));
+         trade.closed_at = StateTextToTime(FileReadString(handle));
+         trade.entry_price = StringToDouble(FileReadString(handle));
+         trade.exit_price = StringToDouble(FileReadString(handle));
+         trade.stop_loss = StringToDouble(FileReadString(handle));
+         trade.take_profit = StringToDouble(FileReadString(handle));
+         trade.pnl = StringToDouble(FileReadString(handle));
+         trade.balance_after = StringToDouble(FileReadString(handle));
+         trade.exit_reason = FileReadString(handle);
+
+         int next_index = ArraySize(saved_trades);
+         ArrayResize(saved_trades, next_index + 1);
+         saved_trades[next_index] = trade;
+         continue;
+      }
+
+      if(row_type == "snapshot")
+      {
+         ATReplaySnapshot snapshot;
+         ZeroMemory(snapshot);
+         snapshot.step_mode = (ATReplayStepMode)StringToInteger(FileReadString(handle));
+         snapshot.next_m1_index = (int)StringToInteger(FileReadString(handle));
+         snapshot.next_tick_index = (int)StringToInteger(FileReadString(handle));
+         snapshot.last_replay_time = StateTextToTime(FileReadString(handle));
+         snapshot.last_bid = StringToDouble(FileReadString(handle));
+         snapshot.last_ask = StringToDouble(FileReadString(handle));
+         snapshot.realized_pnl = StringToDouble(FileReadString(handle));
+         snapshot.closed_trade_count = (int)StringToInteger(FileReadString(handle));
+         snapshot.position.open = StateTextToBool(FileReadString(handle));
+         snapshot.position.side = (int)StringToInteger(FileReadString(handle));
+         snapshot.position.volume_lots = StringToDouble(FileReadString(handle));
+         snapshot.position.entry_price = StringToDouble(FileReadString(handle));
+         snapshot.position.stop_loss = StringToDouble(FileReadString(handle));
+         snapshot.position.take_profit = StringToDouble(FileReadString(handle));
+         snapshot.position.opened_at = StateTextToTime(FileReadString(handle));
+         snapshot.pending_order.active = StateTextToBool(FileReadString(handle));
+         snapshot.pending_order.type = (ATSimPendingType)StringToInteger(FileReadString(handle));
+         snapshot.pending_order.volume_lots = StringToDouble(FileReadString(handle));
+         snapshot.pending_order.entry_price = StringToDouble(FileReadString(handle));
+         snapshot.pending_order.stop_loss = StringToDouble(FileReadString(handle));
+         snapshot.pending_order.take_profit = StringToDouble(FileReadString(handle));
+         snapshot.pending_order.created_at = StateTextToTime(FileReadString(handle));
+
+         int next_snapshot_index = ArraySize(saved_snapshots);
+         ArrayResize(saved_snapshots, next_snapshot_index + 1);
+         saved_snapshots[next_snapshot_index] = snapshot;
+      }
+   }
+
+   FileClose(handle);
+
+   if(!has_meta || !has_session)
+      return(false);
+
+   g_step_mode = (ATReplayStepMode)saved_step_mode;
+   if(g_step_mode == REPLAY_MODE_TICK && ArraySize(g_source_ticks) <= 0)
+   {
+      g_step_mode = REPLAY_MODE_BAR;
+      saved_next_tick_index = 0;
+      saved_is_playing = false;
+   }
+
+   int max_m1_index = ArraySize(g_source_m1);
+   int max_tick_index = ArraySize(g_source_ticks);
+   g_next_m1_index = MathMax(g_first_replay_m1_index, MathMin(saved_next_m1_index, max_m1_index));
+   g_next_tick_index = MathMax(0, MathMin(saved_next_tick_index, max_tick_index));
+   g_last_replay_time = saved_last_replay_time;
+   g_last_bid = saved_last_bid;
+   g_last_ask = saved_last_ask;
+   g_realized_pnl = saved_realized_pnl;
+   g_trade_volume_lots = NormalizeVolumeLots(saved_trade_volume_lots);
+   if(g_trade_volume_lots <= 0.0)
+      g_trade_volume_lots = NormalizeVolumeLots(InpTradeVolumeLots);
+   if(g_trade_volume_lots <= 0.0)
+      g_trade_volume_lots = MathMax(InpTradeVolumeLots, 0.01);
+   g_playback_units = MathMax(saved_playback_units, 1);
+   g_is_playing = saved_is_playing;
+   g_panel_corner = (ENUM_BASE_CORNER)saved_panel_corner;
+   if(g_panel_corner < CORNER_LEFT_UPPER || g_panel_corner > CORNER_RIGHT_LOWER)
+      g_panel_corner = InpPanelCorner;
+   g_panel_x_offset = MathMax(saved_panel_x_offset, 0);
+   g_panel_y_offset = MathMax(saved_panel_y_offset, 0);
+   g_simulated_balance_start = (saved_simulated_balance_start > 0.0 ? saved_simulated_balance_start : ResolveReplayStartingBalance());
+   g_position = saved_position;
+   g_pending_order = saved_pending;
+   ArrayResize(g_closed_trades, ArraySize(saved_trades));
+   for(int trade_index = 0; trade_index < ArraySize(saved_trades); trade_index++)
+      g_closed_trades[trade_index] = saved_trades[trade_index];
+   g_closed_trade_count = ArraySize(saved_trades);
+   ArrayResize(g_snapshots, ArraySize(saved_snapshots));
+   for(int snapshot_index = 0; snapshot_index < ArraySize(saved_snapshots); snapshot_index++)
+      g_snapshots[snapshot_index] = saved_snapshots[snapshot_index];
+   g_snapshot_count = ArraySize(saved_snapshots);
+   if(g_snapshot_count > 0)
+      g_snapshot_cursor = MathMax(0, MathMin(saved_snapshot_cursor, g_snapshot_count - 1));
+   else
+   {
+      g_snapshot_cursor = -1;
+      InitializeReplaySnapshots();
+   }
+   g_workspace_seeded = true;
+
+   if(g_last_bid <= 0.0 || g_last_ask <= 0.0)
+      SynchronizeQuoteFromCustomHistory();
+
+   return(true);
+}
+
+bool HydrateReplayStateFromVisibleHistory()
+{
+   int visible_bars = Bars(g_custom_symbol, PERIOD_M1);
+   if(visible_bars <= 0)
+      return(false);
+
+   MqlRates visible_rates[];
+   ArraySetAsSeries(visible_rates, false);
+   if(CopyRates(g_custom_symbol, PERIOD_M1, 0, visible_bars, visible_rates) <= 0)
+      return(false);
+
+   g_workspace_seeded = true;
+   g_realized_pnl = 0.0;
+   ResetSimPosition();
+   ResetPendingOrder();
+   ResetSessionTrades();
+   g_step_mode = REPLAY_MODE_BAR;
+   g_next_tick_index = 0;
+
+   MqlTick visible_ticks[];
+   ArraySetAsSeries(visible_ticks, false);
+   long from_msc = ((long)g_replay_start_minute) * 1000;
+   long to_msc = (((long)InpReplayEndTime) * 1000) + 999;
+   int visible_tick_count = CopyTicksRange(g_custom_symbol, visible_ticks, COPY_TICKS_ALL, from_msc, to_msc);
+   if(visible_tick_count > 0)
+   {
+      g_step_mode = REPLAY_MODE_TICK;
+      g_next_tick_index = MathMin(visible_tick_count, ArraySize(g_source_ticks));
+      MqlTick last_tick = visible_ticks[visible_tick_count - 1];
+      g_last_replay_time = (datetime)(last_tick.time_msc / 1000);
+      UpdateQuoteFromTick(last_tick);
+      g_next_m1_index = FindFirstBarAfterMinute(FloorToMinute(g_last_replay_time));
+      if(g_next_m1_index < 0)
+         g_next_m1_index = ArraySize(g_source_m1);
+      return(true);
+   }
+
+   MqlRates last_bar = visible_rates[visible_bars - 1];
+   g_last_replay_time = last_bar.time + 59;
+   UpdateQuoteFromBar(last_bar);
+   g_next_m1_index = FindFirstBarAfterMinute(last_bar.time);
+   if(g_next_m1_index < 0)
+      g_next_m1_index = ArraySize(g_source_m1);
+   return(true);
 }
 
 bool PrepareTickReplayData()
