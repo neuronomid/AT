@@ -2762,6 +2762,7 @@ bool EnsureHLine(const string name, const double price, const color line_color, 
 {
    bool exists = (ObjectFind(g_chart_id, name) >= 0);
    bool is_selected = false;
+   int line_width = (style == STYLE_SOLID ? 2 : 1);
    if(exists)
       is_selected = (ObjectGetInteger(g_chart_id, name, OBJPROP_SELECTED) != 0);
 
@@ -2780,7 +2781,7 @@ bool EnsureHLine(const string name, const double price, const color line_color, 
       ok = ObjectSetDouble(g_chart_id, name, OBJPROP_PRICE, price) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_COLOR, line_color) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_STYLE, style) && ok;
-   ok = ObjectSetInteger(g_chart_id, name, OBJPROP_WIDTH, 2) && ok;
+   ok = ObjectSetInteger(g_chart_id, name, OBJPROP_WIDTH, line_width) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_BACK, false) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_SELECTABLE, true) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_SELECTED, is_selected) && ok;
