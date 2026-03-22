@@ -74,6 +74,7 @@ Then compile it in MT5 MetaEditor.
 - `S-`, `S+`: slow down or speed up playback
 - `BUY`, `SELL`, `CLOSE`: simulated trade actions
 - drag the plotted `SL` and `TP` lines on the chart to adjust protection for the staged order or open simulated position
+- drag the panel background to move the control panel anywhere on the chart during the session
 - the replay view expands to keep entry, SL, and TP levels visible while a simulated trade is active
 
 ## Drawing
@@ -87,6 +88,14 @@ Because replay runs on a normal chart:
 - text notes
 
 all use MT5’s normal drawing tools.
+
+On attach and replay reset, the EA explicitly restores the chart’s standard mouse controls on the custom replay chart:
+
+- context menu enabled
+- middle-click crosshair enabled
+- left-mouse chart scrolling enabled
+- drag support for price levels enabled
+- replay auto-pauses when you start creating a normal MT5 drawing object
 
 ## Recommended Workflow
 

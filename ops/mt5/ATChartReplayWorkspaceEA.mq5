@@ -135,6 +135,9 @@ long g_chart_id = 0;
 string g_prefix = "";
 string g_source_symbol = "";
 string g_custom_symbol = "";
+ENUM_BASE_CORNER g_panel_corner = CORNER_RIGHT_LOWER;
+int g_panel_x_offset = 14;
+int g_panel_y_offset = 18;
 ATReplayStepMode g_step_mode = REPLAY_MODE_BAR;
 bool g_is_ready = false;
 bool g_is_playing = false;
@@ -210,10 +213,65 @@ string g_stop_tag_name = "";
 string g_take_tag_name = "";
 string g_floating_tag_name = "";
 
+ENUM_TIMEFRAMES ReplayBarPeriod()
+{
+   if(InpReplayPeriod > PERIOD_CURRENT)
+      return(InpReplayPeriod);
+
+   ENUM_TIMEFRAMES chart_period = (ENUM_TIMEFRAMES)Period();
+   if(chart_period > PERIOD_CURRENT)
+      return(chart_period);
+
+   return(PERIOD_M1);
+}
+
+bool WaitForVisibleCustomHistory(const int max_attempts, const int sleep_millis)
+{
+   if(g_first_replay_m1_index <= 0)
+      return(true);
+
+   MqlRates probe[];
+   ArraySetAsSeries(probe, false);
+
+   for(int attempt = 0; attempt < max_attempts; attempt++)
+   {
+      ResetLastError();
+      if(CopyRates(g_custom_symbol, PERIOD_M1, 0, 2, probe) > 0)
+         return(true);
+
+      if((attempt + 1) < max_attempts)
+         Sleep(MathMax(sleep_millis, 1));
+   }
+
+   return(false);
+}
+
+bool ReplayConfigurationMatchesCurrentInputs()
+{
+   string expected = BuildReplayDescription(g_source_symbol, InpWorkspaceId);
+   string current = SymbolInfoString(g_custom_symbol, SYMBOL_DESCRIPTION);
+   return(current == expected);
+}
+
+string ReplayPeriodText()
+{
+   ENUM_TIMEFRAMES replay_period = ReplayBarPeriod();
+   ENUM_TIMEFRAMES chart_period = (ENUM_TIMEFRAMES)Period();
+   string period_text = EnumToString(replay_period);
+
+   if(chart_period > PERIOD_CURRENT && chart_period != replay_period)
+      period_text += " | chart " + EnumToString(chart_period);
+
+   return(period_text);
+}
+
 int OnInit()
 {
    g_chart_id = ChartID();
    g_prefix = "ATReplay_" + IntegerToString((int)g_chart_id) + "_" + IntegerToString((int)GetTickCount());
+   g_panel_corner = InpPanelCorner;
+   g_panel_x_offset = MathMax(InpXOffset, 0);
+   g_panel_y_offset = MathMax(InpYOffset, 0);
    AssignObjectNames();
    g_playback_units = MathMax(InpPlaybackUnitsPerTimer, 1);
    g_step_mode = (InpUseRealTicks ? REPLAY_MODE_TICK : REPLAY_MODE_BAR);
@@ -235,7 +293,7 @@ int OnInit()
       if(!ResetReplayWorkspace(true))
          return(INIT_FAILED);
 
-      if(!ChartSetSymbolPeriod(g_chart_id, g_custom_symbol, InpReplayPeriod))
+      if(!ChartSetSymbolPeriod(g_chart_id, g_custom_symbol, ReplayBarPeriod()))
       {
          Print(__FUNCTION__, ": ChartSetSymbolPeriod failed. Error code = ", GetLastError());
          return(INIT_FAILED);
@@ -243,7 +301,7 @@ int OnInit()
       return(INIT_SUCCEEDED);
    }
 
-   if(Bars(g_custom_symbol, PERIOD_M1) <= 0)
+   if(!ReplayConfigurationMatchesCurrentInputs() || !WaitForVisibleCustomHistory(6, 50))
    {
       if(!ResetReplayWorkspace(false))
          return(INIT_FAILED);
@@ -258,6 +316,7 @@ int OnInit()
    InitializeReplaySnapshots();
    UpdateInterface();
    SynchronizeViewToLatest();
+   ChartSetInteger(g_chart_id, CHART_EVENT_OBJECT_CREATE, true);
    ChartSetInteger(g_chart_id, CHART_EVENT_OBJECT_DELETE, true);
    EventSetTimer(MathMax(InpTimerIntervalSeconds, 1));
    g_is_ready = true;
@@ -304,6 +363,12 @@ void OnTimer()
 
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
 {
+   if(id == CHARTEVENT_OBJECT_CREATE)
+   {
+      PauseReplayForUserDrawing(sparam);
+      return;
+   }
+
    if(id == CHARTEVENT_OBJECT_CLICK)
    {
       HandleButtonClick(sparam);
@@ -312,6 +377,11 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 
    if(id == CHARTEVENT_OBJECT_DRAG)
    {
+      if(sparam == g_panel_name)
+      {
+         HandlePanelDrag();
+         return;
+      }
       HandleInteractiveObjectDrag(sparam);
       return;
    }
@@ -337,8 +407,15 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 
 void ConfigureChartBehavior()
 {
+   // The replay workspace runs on a custom symbol chart, so restore the normal
+   // MT5 mouse interactions explicitly instead of relying on whatever chart
+   // input state happened to be active before the symbol switch.
+   ChartSetInteger(g_chart_id, CHART_CONTEXT_MENU, true);
+   ChartSetInteger(g_chart_id, CHART_CROSSHAIR_TOOL, true);
+   ChartSetInteger(g_chart_id, CHART_MOUSE_SCROLL, true);
+   ChartSetInteger(g_chart_id, CHART_DRAG_TRADE_LEVELS, true);
    ChartSetInteger(g_chart_id, CHART_QUICK_NAVIGATION, false);
-   ChartSetInteger(g_chart_id, CHART_KEYBOARD_CONTROL, false);
+   ChartSetInteger(g_chart_id, CHART_KEYBOARD_CONTROL, true);
    ChartSetInteger(g_chart_id, CHART_AUTOSCROLL, true);
    ChartSetInteger(g_chart_id, CHART_SHIFT, true);
    ChartSetDouble(g_chart_id, CHART_SHIFT_SIZE, 20.0);
@@ -394,6 +471,56 @@ string BuildObjectName(const string suffix)
    return(g_prefix + "_" + suffix);
 }
 
+bool IsManagedChartObject(const string name)
+{
+   if(name == "")
+      return(false);
+   return(StringFind(name, g_prefix + "_") == 0);
+}
+
+void PauseReplayForUserDrawing(const string object_name)
+{
+   if(object_name == "" || IsManagedChartObject(object_name) || !g_is_playing)
+      return;
+
+   g_is_playing = false;
+   SetStatus("Replay paused while drawing " + object_name + ".", InpAccentColor);
+   UpdateInterface();
+}
+
+int ResolvePanelOffsetXFromDistance(const int xdistance, const int object_width)
+{
+   if(IsRightCorner())
+      return(MathMax(xdistance - object_width, 0));
+   return(MathMax(xdistance, 0));
+}
+
+int ResolvePanelOffsetYFromDistance(const int ydistance, const int object_height)
+{
+   if(IsLowerCorner())
+      return(MathMax(ydistance - object_height, 0));
+   return(MathMax(ydistance, 0));
+}
+
+void HandlePanelDrag()
+{
+   if(ObjectFind(g_chart_id, g_panel_name) < 0)
+      return;
+
+   long dragged_corner = ObjectGetInteger(g_chart_id, g_panel_name, OBJPROP_CORNER);
+   if(dragged_corner < CORNER_LEFT_UPPER || dragged_corner > CORNER_RIGHT_LOWER)
+      dragged_corner = g_panel_corner;
+
+   g_panel_corner = (ENUM_BASE_CORNER)dragged_corner;
+   g_panel_x_offset = ResolvePanelOffsetXFromDistance((int)ObjectGetInteger(g_chart_id, g_panel_name, OBJPROP_XDISTANCE), InpPanelWidth);
+   g_panel_y_offset = ResolvePanelOffsetYFromDistance((int)ObjectGetInteger(g_chart_id, g_panel_name, OBJPROP_YDISTANCE), InpPanelHeight);
+
+   ObjectSetInteger(g_chart_id, g_panel_name, OBJPROP_SELECTED, false);
+   BuildInterface();
+   SetStatus("Control panel moved.", InpAccentColor);
+   UpdateInterface();
+}
+
 double ResolveReplayStartingBalance()
 {
    if(InpReplayStartingBalance > 0.0)
@@ -412,9 +539,13 @@ void RefreshReplayChart()
    if(chart_symbol == "")
       chart_symbol = g_custom_symbol;
 
-   ENUM_TIMEFRAMES chart_period = (ENUM_TIMEFRAMES)Period();
-   if(chart_period <= PERIOD_CURRENT)
-      chart_period = InpReplayPeriod;
+   ENUM_TIMEFRAMES chart_period = ReplayBarPeriod();
+
+   if(Symbol() == chart_symbol && (ENUM_TIMEFRAMES)Period() == chart_period)
+   {
+      ChartRedraw(g_chart_id);
+      return;
+   }
 
    ResetLastError();
    if(!ChartSetSymbolPeriod(g_chart_id, chart_symbol, chart_period))
@@ -611,7 +742,14 @@ bool EnsureCustomReplaySymbol()
 
 string BuildReplayDescription(const string source_symbol, const string workspace_id)
 {
-   return("ATReplay|source=" + source_symbol + "|workspace=" + workspace_id);
+   return(
+      "ATReplay|source=" + source_symbol
+      + "|workspace=" + workspace_id
+      + "|period=" + IntegerToString((int)ReplayBarPeriod())
+      + "|start=" + TimeToString(InpReplayStartTime, TIME_DATE | TIME_MINUTES)
+      + "|end=" + TimeToString(InpReplayEndTime, TIME_DATE | TIME_MINUTES)
+      + "|warmup=" + IntegerToString(InpWarmupMinutes)
+   );
 }
 
 bool PrepareTickReplayData()
@@ -771,7 +909,10 @@ bool ResetReplayWorkspace(const bool preserve_play_state)
    if(!preserve_play_state)
       g_is_playing = !InpStartPaused;
 
-   RefreshReplayChart();
+   if(Symbol() == g_custom_symbol)
+      RefreshReplayChart();
+   else
+      ChartRedraw(g_chart_id);
    ConfigureChartBehavior();
    InitializeReplaySnapshots();
    SynchronizeViewToLatest();
@@ -983,7 +1124,7 @@ bool AdvanceOneChartBar()
    if(g_next_m1_index >= ArraySize(g_source_m1))
       return(false);
 
-   int timeframe_seconds = PeriodSeconds((ENUM_TIMEFRAMES)Period());
+   int timeframe_seconds = PeriodSeconds(ReplayBarPeriod());
    if(timeframe_seconds <= 0)
       timeframe_seconds = 60;
 
@@ -2173,7 +2314,7 @@ void DeleteInterface()
 void UpdateInterface()
 {
    ObjectSetString(g_chart_id, g_title_name, OBJPROP_TEXT, "AT Chart Replay");
-   ObjectSetString(g_chart_id, g_meta_name, OBJPROP_TEXT, g_source_symbol + " -> " + g_custom_symbol + " | " + EnumToString((ENUM_TIMEFRAMES)Period()));
+   ObjectSetString(g_chart_id, g_meta_name, OBJPROP_TEXT, g_source_symbol + " -> " + g_custom_symbol + " | " + ReplayPeriodText());
 
    string quote_text = "Bid " + PriceToText(g_last_bid) + " | Ask " + PriceToText(g_last_ask) + " | " + TimeToString(g_last_replay_time, TIME_DATE | TIME_MINUTES);
    ObjectSetString(g_chart_id, g_quote_name, OBJPROP_TEXT, quote_text);
@@ -2553,7 +2694,7 @@ bool EnsureSessionReportChart()
    if(SessionReportChartIsOpen())
       return(true);
 
-   g_report_chart_id = ChartOpen(g_custom_symbol, (ENUM_TIMEFRAMES)Period());
+   g_report_chart_id = ChartOpen(g_custom_symbol, ReplayBarPeriod());
    if(g_report_chart_id <= 0)
    {
       SetStatus("Could not open the session report window.", InpWarnColor);
@@ -2803,7 +2944,7 @@ void RenderSessionReportWindow()
    EnsureReportLabel(
       g_report_chart_id,
       ReportObjectName("meta"),
-      g_source_symbol + " -> " + g_custom_symbol + " | " + EnumToString((ENUM_TIMEFRAMES)Period())
+      g_source_symbol + " -> " + g_custom_symbol + " | " + ReplayPeriodText()
       + " | " + TimeToString(InpReplayStartTime, TIME_DATE | TIME_MINUTES)
       + " -> " + TimeToString(g_last_replay_time, TIME_DATE | TIME_MINUTES),
       outer_padding,
@@ -3069,7 +3210,7 @@ bool EnsureRectangleLabel(
    }
 
    bool ok = true;
-   ok = ObjectSetInteger(g_chart_id, name, OBJPROP_CORNER, InpPanelCorner) && ok;
+   ok = ObjectSetInteger(g_chart_id, name, OBJPROP_CORNER, g_panel_corner) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_XDISTANCE, x) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_YDISTANCE, y) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_XSIZE, width) && ok;
@@ -3079,7 +3220,7 @@ bool EnsureRectangleLabel(
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_COLOR, border_color) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_WIDTH, border_width) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_BACK, false) && ok;
-   ok = ObjectSetInteger(g_chart_id, name, OBJPROP_SELECTABLE, false) && ok;
+   ok = ObjectSetInteger(g_chart_id, name, OBJPROP_SELECTABLE, name == g_panel_name) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_SELECTED, false) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_HIDDEN, true) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_ZORDER, 0) && ok;
@@ -3103,7 +3244,7 @@ bool EnsureTextLabel(
    }
 
    bool ok = true;
-   ok = ObjectSetInteger(g_chart_id, name, OBJPROP_CORNER, InpPanelCorner) && ok;
+   ok = ObjectSetInteger(g_chart_id, name, OBJPROP_CORNER, g_panel_corner) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_XDISTANCE, x) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_YDISTANCE, y) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_COLOR, text_color) && ok;
@@ -3134,7 +3275,7 @@ bool EnsureButton(
    }
 
    bool ok = true;
-   ok = ObjectSetInteger(g_chart_id, name, OBJPROP_CORNER, InpPanelCorner) && ok;
+   ok = ObjectSetInteger(g_chart_id, name, OBJPROP_CORNER, g_panel_corner) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_XDISTANCE, x) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_YDISTANCE, y) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_XSIZE, width) && ok;
@@ -3171,7 +3312,7 @@ bool EnsureEdit(
    }
 
    bool ok = true;
-   ok = ObjectSetInteger(g_chart_id, name, OBJPROP_CORNER, InpPanelCorner) && ok;
+   ok = ObjectSetInteger(g_chart_id, name, OBJPROP_CORNER, g_panel_corner) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_XDISTANCE, x) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_YDISTANCE, y) && ok;
    ok = ObjectSetInteger(g_chart_id, name, OBJPROP_XSIZE, width) && ok;
@@ -3200,40 +3341,40 @@ void ColorizeButton(const string name, const color background_color, const color
 
 bool IsRightCorner()
 {
-   return(InpPanelCorner == CORNER_RIGHT_UPPER || InpPanelCorner == CORNER_RIGHT_LOWER);
+   return(g_panel_corner == CORNER_RIGHT_UPPER || g_panel_corner == CORNER_RIGHT_LOWER);
 }
 
 bool IsLowerCorner()
 {
-   return(InpPanelCorner == CORNER_LEFT_LOWER || InpPanelCorner == CORNER_RIGHT_LOWER);
+   return(g_panel_corner == CORNER_LEFT_LOWER || g_panel_corner == CORNER_RIGHT_LOWER);
 }
 
 int ResolvePanelXDistance(const int object_width)
 {
    if(IsRightCorner())
-      return(InpXOffset + object_width);
-   return(InpXOffset);
+      return(g_panel_x_offset + object_width);
+   return(g_panel_x_offset);
 }
 
 int ResolvePanelYDistance(const int object_height)
 {
    if(IsLowerCorner())
-      return(InpYOffset + object_height);
-   return(InpYOffset);
+      return(g_panel_y_offset + object_height);
+   return(g_panel_y_offset);
 }
 
 int ResolveInnerX(const int offset)
 {
    if(IsRightCorner())
-      return(InpXOffset + InpPanelWidth - offset);
-   return(InpXOffset + offset);
+      return(g_panel_x_offset + InpPanelWidth - offset);
+   return(g_panel_x_offset + offset);
 }
 
 int ResolveInnerY(const int offset)
 {
    if(IsLowerCorner())
-      return(InpYOffset + InpPanelHeight - offset);
-   return(InpYOffset + offset);
+      return(g_panel_y_offset + InpPanelHeight - offset);
+   return(g_panel_y_offset + offset);
 }
 
 void SynchronizeViewToLatest()
